@@ -17,9 +17,12 @@ from config import config
 from models import (
     create_bg_task,
     create_cf_account,
+    create_feed_product,
     create_plugin,
+    create_sample_feed_products,
     create_site,
     delete_cf_account,
+    delete_feed_product,
     delete_plugin,
     delete_site,
     get_bg_task,
@@ -28,15 +31,18 @@ from models import (
     get_db,
     get_default_cf_account,
     get_enabled_plugins,
+    get_feed_product,
     get_global_config,
     get_plugin,
     get_site,
     init_db,
     list_cf_accounts,
+    list_feed_products,
     list_plugins,
     list_sites,
     set_default_cf_account,
     update_bg_task,
+    update_feed_product,
     update_global_config,
     update_site,
     update_site_fields,
@@ -2199,4 +2205,130 @@ def register_routes(app):
             return jsonify({"code": 200, "data": {"connected": resp.get("success", False)}})
         except Exception:
             return jsonify({"code": 200, "data": {"connected": False}})
+
+    # ---- Feed Products (Google Merchant Center) ----
+
+    @app.route("/api/sites/<int:site_id>/feed-products", methods=["GET"])
+    @jwt_required()
+    def list_feed_products_route(site_id):
+        try:
+            site = get_site(site_id)
+            if not site:
+                return jsonify({"code": 404, "message": "站点不存在"}), 404
+            products = list_feed_products(site_id)
+            return jsonify({"code": 200, "data": products})
+        except Exception as e:
+            logger.error(f"Feed products list failed: {e}")
+            return jsonify({"code": 500, "message": f"获取商品列表失败: {str(e)[:100]}"}), 500
+
+    @app.route("/api/sites/<int:site_id>/feed-products", methods=["POST"])
+    @jwt_required()
+    def create_feed_product_route(site_id):
+        try:
+            site = get_site(site_id)
+            if not site:
+                return jsonify({"code": 404, "message": "站点不存在"}), 404
+            data = request.get_json(silent=True) or {}
+            data["site_id"] = site_id
+            if not data.get("title"):
+                return jsonify({"code": 400, "message": "商品标题不能为空"}), 400
+            product = create_feed_product(data)
+            return jsonify({"code": 200, "data": product})
+        except Exception as e:
+            logger.error(f"Feed product create failed: {e}")
+            return jsonify({"code": 500, "message": f"创建商品失败: {str(e)[:100]}"}), 500
+
+    @app.route("/api/feed-products/<int:product_id>", methods=["PUT"])
+    @jwt_required()
+    def update_feed_product_route(product_id):
+        try:
+            product = get_feed_product(product_id)
+            if not product:
+                return jsonify({"code": 404, "message": "商品不存在"}), 404
+            data = request.get_json(silent=True) or {}
+            updated = update_feed_product(product_id, data)
+            return jsonify({"code": 200, "data": updated})
+        except Exception as e:
+            logger.error(f"Feed product update failed: {e}")
+            return jsonify({"code": 500, "message": f"更新商品失败: {str(e)[:100]}"}), 500
+
+    @app.route("/api/feed-products/<int:product_id>", methods=["DELETE"])
+    @jwt_required()
+    def delete_feed_product_route(product_id):
+        try:
+            product = get_feed_product(product_id)
+            if not product:
+                return jsonify({"code": 404, "message": "商品不存在"}), 404
+            delete_feed_product(product_id)
+            return jsonify({"code": 200, "message": "商品已删除"})
+        except Exception as e:
+            logger.error(f"Feed product delete failed: {e}")
+            return jsonify({"code": 500, "message": f"删除商品失败: {str(e)[:100]}"}), 500
+
+    @app.route("/api/sites/<int:site_id>/feed-products/sample", methods=["POST"])
+    @jwt_required()
+    def create_sample_feed_products_route(site_id):
+        try:
+            site = get_site(site_id)
+            if not site:
+                return jsonify({"code": 404, "message": "站点不存在"}), 404
+            domain = site.get("site_name", "")
+            products = create_sample_feed_products(site_id, domain)
+            return jsonify({"code": 200, "data": products, "message": f"已导入 {len(products)} 个示例商品"})
+        except Exception as e:
+            logger.error(f"Sample feed products create failed: {e}")
+            return jsonify({"code": 500, "message": f"导入示例失败: {str(e)[:100]}"}), 500
+
+    @app.route("/api/sites/<int:site_id>/feed-products/export", methods=["GET"])
+    @jwt_required()
+    def export_feed_products_route(site_id):
+        try:
+            site = get_site(site_id)
+            if not site:
+                return jsonify({"code": 404, "message": "站点不存在"}), 404
+            products = list_feed_products(site_id)
+            domain = site.get("site_name", "example.com")
+
+            def cdata(val):
+                return f"<![CDATA[{val}]]>"
+
+            items = []
+            for p in products:
+                items.append(f"""  <item>
+    <g:id>{p['id']}</g:id>
+    <title>{cdata(p['title'])}</title>
+    <description>{cdata(p['description'])}</description>
+    <link>{cdata(p['link'] or f'https://{domain}')}</link>
+    <g:image_link>{cdata(p['image_url'])}</g:image_link>
+    <g:price>{p['price']}</g:price>
+    <g:availability>{p['availability']}</g:availability>
+    <g:condition>{p['condition']}</g:condition>
+    <g:brand>{cdata(p['brand'])}</g:brand>
+    <g:gtin>{p['gtin']}</g:gtin>
+    <g:mpn>{p['mpn']}</g:mpn>
+    <g:google_product_category>{cdata(p['google_product_category'])}</g:google_product_category>
+    <g:product_type>{cdata(p['product_type'])}</g:product_type>
+    <g:shipping>
+      <g:country>US</g:country>
+      <g:service>Standard</g:service>
+      <g:price>{p.get('shipping', '0.00 USD')}</g:price>
+    </g:shipping>
+  </item>""")
+
+            xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss xmlns:g="http://base.google.com/ns/1.0" version="2.0">
+<channel>
+  <title>{cdata(site.get('tag') or domain)}</title>
+  <link>{cdata(f'https://{domain}')}</link>
+  <description>{cdata(f'Product feed for {domain}')}</description>
+{chr(10).join(items)}
+</channel>
+</rss>"""
+
+            from flask import Response
+            return Response(xml, mimetype="application/xml",
+                            headers={"Content-Disposition": f"attachment; filename=feed_{site_id}.xml"})
+        except Exception as e:
+            logger.error(f"Feed export failed: {e}")
+            return jsonify({"code": 500, "message": f"导出失败: {str(e)[:100]}"}), 500
 

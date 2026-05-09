@@ -266,4 +266,40 @@ const API = {
         if (accountId) url += `?account_id=${accountId}`;
         return this.request('GET', url);
     },
+
+    // Feed Products (Google Merchant Center)
+    async getFeedProducts(siteId) {
+        return this.request('GET', `/api/sites/${siteId}/feed-products`);
+    },
+
+    async createFeedProduct(siteId, data) {
+        return this.request('POST', `/api/sites/${siteId}/feed-products`, data);
+    },
+
+    async updateFeedProduct(productId, data) {
+        return this.request('PUT', `/api/feed-products/${productId}`, data);
+    },
+
+    async deleteFeedProduct(productId) {
+        return this.request('DELETE', `/api/feed-products/${productId}`);
+    },
+
+    async createSampleFeedProducts(siteId) {
+        return this.request('POST', `/api/sites/${siteId}/feed-products/sample`);
+    },
+
+    async exportFeedProducts(siteId) {
+        const resp = await fetch(`/api/sites/${siteId}/feed-products/export`, {
+            headers: { 'Authorization': `Bearer ${this.token}` }
+        });
+        if (!resp.ok) throw new Error('Export failed');
+        const blob = await resp.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `feed_${siteId}.xml`;
+        a.click();
+        window.URL.revokeObjectURL(url);
+        return { code: 200, message: '导出成功' };
+    },
 };

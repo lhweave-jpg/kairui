@@ -128,6 +128,30 @@ def init_db():
         )
     """)
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS feed_products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            site_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            price TEXT DEFAULT '',
+            currency TEXT DEFAULT 'USD',
+            availability TEXT DEFAULT 'in_stock',
+            brand TEXT DEFAULT '',
+            gtin TEXT DEFAULT '',
+            mpn TEXT DEFAULT '',
+            google_product_category TEXT DEFAULT '',
+            product_type TEXT DEFAULT '',
+            image_url TEXT DEFAULT '',
+            link TEXT DEFAULT '',
+            condition TEXT DEFAULT 'new',
+            shipping TEXT DEFAULT '',
+            created_at TEXT,
+            updated_at TEXT,
+            FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
+        )
+    """)
+
     # Add cf_api_token to global_config defaults
     defaults = {
         "default_admin_name": "admin",
@@ -173,6 +197,15 @@ def _migrate_add_columns(conn):
                     "INSERT INTO global_config (config_key, config_value, updated_at) VALUES (?, ?, ?)",
                     (key, value, datetime.utcnow().isoformat()),
                 )
+    except Exception:
+        pass
+
+    # ---- Feed Products migration ----
+    try:
+        feed_cols = [row[1] for row in conn.execute("PRAGMA table_info(feed_products)").fetchall()]
+        for col, defn in [("brand", "TEXT DEFAULT ''"), ("shipping", "TEXT DEFAULT ''")]:
+            if col not in feed_cols:
+                conn.execute(f"ALTER TABLE feed_products ADD COLUMN {col} {defn}")
     except Exception:
         pass
 
@@ -776,6 +809,257 @@ def create_cf_account(data):
         conn.commit()
         new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         return get_cf_account(new_id)
+    finally:
+        conn.close()
+
+
+# ---- Feed Products (Google Merchant Center) ----
+
+def list_feed_products(site_id):
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM feed_products WHERE site_id = ? ORDER BY id ASC", (site_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_feed_product(product_id):
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT * FROM feed_products WHERE id = ?", (product_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def create_feed_product(data):
+    conn = get_db()
+    now = datetime.utcnow().isoformat()
+    try:
+        conn.execute(
+            """INSERT INTO feed_products
+               (site_id, title, description, price, currency, availability,
+                brand, gtin, mpn, google_product_category, product_type,
+                image_url, link, condition, shipping,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                data["site_id"],
+                data.get("title", ""),
+                data.get("description", ""),
+                data.get("price", ""),
+                data.get("currency", "USD"),
+                data.get("availability", "in_stock"),
+                data.get("brand", ""),
+                data.get("gtin", ""),
+                data.get("mpn", ""),
+                data.get("google_product_category", ""),
+                data.get("product_type", ""),
+                data.get("image_url", ""),
+                data.get("link", ""),
+                data.get("condition", "new"),
+                data.get("shipping", ""),
+                now, now,
+            ),
+        )
+        pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.commit()
+        return get_feed_product(pid)
+    finally:
+        conn.close()
+
+
+def update_feed_product(product_id, data):
+    conn = get_db()
+    now = datetime.utcnow().isoformat()
+    try:
+        row = conn.execute("SELECT * FROM feed_products WHERE id = ?", (product_id,)).fetchone()
+        if not row:
+            return None
+        conn.execute(
+            """UPDATE feed_products SET
+               title=?, description=?, price=?, currency=?, availability=?,
+               brand=?, gtin=?, mpn=?, google_product_category=?, product_type=?,
+               image_url=?, link=?, condition=?, shipping=?,
+               updated_at=?
+               WHERE id=?""",
+            (
+                data.get("title", row["title"]),
+                data.get("description", row["description"]),
+                data.get("price", row["price"]),
+                data.get("currency", row["currency"]),
+                data.get("availability", row["availability"]),
+                data.get("brand", row["brand"]),
+                data.get("gtin", row["gtin"]),
+                data.get("mpn", row["mpn"]),
+                data.get("google_product_category", row["google_product_category"]),
+                data.get("product_type", row["product_type"]),
+                data.get("image_url", row["image_url"]),
+                data.get("link", row["link"]),
+                data.get("condition", row["condition"]),
+                data.get("shipping", row["shipping"]),
+                now,
+                product_id,
+            ),
+        )
+        conn.commit()
+        return get_feed_product(product_id)
+    finally:
+        conn.close()
+
+
+def delete_feed_product(product_id):
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM feed_products WHERE id = ?", (product_id,))
+        conn.commit()
+        _compact_ids(conn, "feed_products")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+SAMPLE_FEED_PRODUCTS = [
+    {
+        "title": "经典纯棉男士T恤 - 夏季新款",
+        "description": "100%纯棉面料，透气舒适。圆领设计，多色可选。适合日常休闲穿着。",
+        "price": "29.99 USD",
+        "currency": "USD",
+        "availability": "in_stock",
+        "brand": "FashionPlus",
+        "gtin": "06123456789012",
+        "mpn": "FP-MT-001-BLK",
+        "google_product_category": "Apparel & Accessories > Clothing > Shirts & Tops > T-Shirts",
+        "product_type": "Men's T-Shirt",
+        "image_url": "https://example.com/images/mens-tshirt-black.jpg",
+        "link": "",
+        "condition": "new",
+        "shipping": "US:0.00 USD",
+    },
+    {
+        "title": "无线蓝牙耳机 Pro - 主动降噪",
+        "description": "蓝牙5.3芯片，40小时续航，主动降噪，IPX5防水。适用于运动、通勤。",
+        "price": "79.99 USD",
+        "currency": "USD",
+        "availability": "in_stock",
+        "brand": "SoundWave",
+        "gtin": "06123456789029",
+        "mpn": "SW-BT-PRO-BLK",
+        "google_product_category": "Electronics > Audio > Headphones > Bluetooth Headphones",
+        "product_type": "Wireless Earbuds",
+        "image_url": "https://example.com/images/wireless-earbuds-pro.jpg",
+        "link": "",
+        "condition": "new",
+        "shipping": "US:5.99 USD",
+    },
+    {
+        "title": "有机绿茶 高山云雾 100g",
+        "description": "高山海拔1200米种植，手工采摘，有机认证。清新回甘。",
+        "price": "15.99 USD",
+        "currency": "USD",
+        "availability": "in_stock",
+        "brand": "NatureLeaf",
+        "gtin": "06123456789036",
+        "mpn": "NL-GT-100G",
+        "google_product_category": "Food, Beverages & Tobacco > Beverages > Tea & Infusions > Green Tea",
+        "product_type": "Organic Green Tea",
+        "image_url": "https://example.com/images/organic-green-tea.jpg",
+        "link": "",
+        "condition": "new",
+        "shipping": "US:3.99 USD",
+    },
+    {
+        "title": "瑜伽垫 加厚防滑 NBR材质 6mm",
+        "description": "环保NBR材质，双面防滑纹理，附带绑带和背包。适用于瑜伽、普拉提、健身。",
+        "price": "24.99 USD",
+        "currency": "USD",
+        "availability": "in_stock",
+        "brand": "FlexFit",
+        "gtin": "06123456789043",
+        "mpn": "FF-YM-6MM-PUR",
+        "google_product_category": "Sporting Goods > Exercise & Fitness > Yoga & Pilates > Yoga Mats",
+        "product_type": "Yoga Mat",
+        "image_url": "https://example.com/images/yoga-mat-purple.jpg",
+        "link": "",
+        "condition": "new",
+        "shipping": "US:0.00 USD",
+    },
+    {
+        "title": "智能手表 Ultra - GPS+心率+血氧",
+        "description": "1.5寸AMOLED屏，GPS定位，心率血氧监测，100+运动模式，14天续航。",
+        "price": "199.99 USD",
+        "currency": "USD",
+        "availability": "in_stock",
+        "brand": "TechBand",
+        "gtin": "06123456789050",
+        "mpn": "TB-ULTRA-SLV",
+        "google_product_category": "Electronics > Wearable Technology > Smartwatches",
+        "product_type": "Smartwatch",
+        "image_url": "https://example.com/images/smartwatch-ultra.jpg",
+        "link": "",
+        "condition": "new",
+        "shipping": "US:9.99 USD",
+    },
+    {
+        "title": "不锈钢保温杯 500ml 真空双层",
+        "description": "304不锈钢内胆，12小时保温，8小时保冷。BPA-free杯盖。",
+        "price": "19.99 USD",
+        "currency": "USD",
+        "availability": "in_stock",
+        "brand": "ThermoKeep",
+        "gtin": "06123456789067",
+        "mpn": "TK-SS-500-WHT",
+        "google_product_category": "Home & Garden > Kitchen & Dining > Drinkware > Thermoses & Insulated Beverage Containers",
+        "product_type": "Insulated Water Bottle",
+        "image_url": "https://example.com/images/insulated-bottle-white.jpg",
+        "link": "",
+        "condition": "new",
+        "shipping": "US:4.99 USD",
+    },
+]
+
+
+def create_sample_feed_products(site_id, domain=""):
+    """Insert GMC sample products for a site. Returns list of created products."""
+    conn = get_db()
+    now = datetime.utcnow().isoformat()
+    created = []
+    try:
+        for p in SAMPLE_FEED_PRODUCTS:
+            link = p["link"] or (f"https://{domain}/product/{p['mpn'].lower()}" if domain else "")
+            conn.execute(
+                """INSERT INTO feed_products
+                   (site_id, title, description, price, currency, availability,
+                    brand, gtin, mpn, google_product_category, product_type,
+                    image_url, link, condition, shipping,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    site_id,
+                    p["title"], p["description"], p["price"], p["currency"], p["availability"],
+                    p["brand"], p["gtin"], p["mpn"], p["google_product_category"], p["product_type"],
+                    p["image_url"], link, p["condition"], p["shipping"],
+                    now, now,
+                ),
+            )
+            pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            created.append({
+                "id": pid, "site_id": site_id,
+                "title": p["title"], "description": p["description"],
+                "price": p["price"], "currency": p["currency"],
+                "availability": p["availability"], "brand": p["brand"],
+                "gtin": p["gtin"], "mpn": p["mpn"],
+                "google_product_category": p["google_product_category"],
+                "product_type": p["product_type"],
+                "image_url": p["image_url"], "link": link,
+                "condition": p["condition"], "shipping": p["shipping"],
+                "created_at": now, "updated_at": now,
+            })
+        conn.commit()
+        return created
     finally:
         conn.close()
 

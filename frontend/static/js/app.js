@@ -72,6 +72,18 @@ const app = createApp({
         const plugins = ref([]);
         const uploadProgress = ref(0);
 
+        // Feed Products (GMC)
+        const feedSiteId = ref('');
+        const feedProducts = ref([]);
+        const showFeedProductModal = ref(false);
+        const feedEditId = ref(null);
+        const feedEditForm = reactive({
+            title: '', description: '', price: '', currency: 'USD',
+            availability: 'in_stock', brand: '', gtin: '', mpn: '',
+            google_product_category: '', product_type: '',
+            image_url: '', link: '', condition: 'new', shipping: '',
+        });
+
         // Config
         const globalConfig = reactive({
             default_admin_name: 'admin', default_admin_password: '',
@@ -179,6 +191,52 @@ const app = createApp({
         async function handleDeleteTheme(theme) {
             if (!confirm(`确定删除主题 "${theme.name}"?`)) return;
             try { await API.deleteTheme(theme.id); showToast('主题已删除'); await loadThemes(); } catch (e) { showToast('删除失败', 'error'); }
+        }
+
+        // ---- Feed Products (GMC) ----
+        async function loadFeedProducts() {
+            if (!feedSiteId.value) { feedProducts.value = []; return; }
+            try { const resp = await API.getFeedProducts(feedSiteId.value); if (resp.code === 200) feedProducts.value = resp.data || []; } catch (e) {}
+        }
+        function openFeedProductModal(product) {
+            if (product) {
+                feedEditId.value = product.id;
+                Object.assign(feedEditForm, product);
+            } else {
+                feedEditId.value = null;
+                Object.keys(feedEditForm).forEach(k => feedEditForm[k] = k === 'currency' ? 'USD' : k === 'availability' ? 'in_stock' : k === 'condition' ? 'new' : '');
+            }
+            showFeedProductModal.value = true;
+        }
+        function closeFeedProductModal() { showFeedProductModal.value = false; }
+        async function handleSaveFeedProduct() {
+            if (!feedEditForm.title.trim()) { showToast('商品标题不能为空', 'error'); return; }
+            try {
+                let resp;
+                if (feedEditId.value) {
+                    resp = await API.updateFeedProduct(feedEditId.value, feedEditForm);
+                } else {
+                    resp = await API.createFeedProduct(feedSiteId.value, feedEditForm);
+                }
+                if (resp.code === 200) { showToast(feedEditId.value ? '商品已更新' : '商品已添加'); closeFeedProductModal(); await loadFeedProducts(); }
+                else { showToast(resp.message || '操作失败', 'error'); }
+            } catch (e) { showToast('操作失败', 'error'); }
+        }
+        async function handleDeleteFeedProduct(product) {
+            if (!confirm(`确定删除商品 "${product.title}"?`)) return;
+            try { await API.deleteFeedProduct(product.id); showToast('商品已删除'); await loadFeedProducts(); } catch (e) { showToast('删除失败', 'error'); }
+        }
+        async function handleImportSampleProducts() {
+            if (!feedSiteId.value) { showToast('请先选择一个站点', 'error'); return; }
+            try {
+                const resp = await API.createSampleFeedProducts(feedSiteId.value);
+                if (resp.code === 200) { showToast(resp.message || '示例商品已导入'); await loadFeedProducts(); }
+                else { showToast(resp.message || '导入失败', 'error'); }
+            } catch (e) { showToast('导入失败', 'error'); }
+        }
+        async function handleExportFeed() {
+            if (!feedSiteId.value) { showToast('请先选择一个站点', 'error'); return; }
+            try { await API.exportFeedProducts(feedSiteId.value); showToast('Feed XML 已导出'); } catch (e) { showToast('导出失败', 'error'); }
         }
 
         // ---- Cloudflare ----
@@ -387,6 +445,7 @@ const app = createApp({
             wizardStep, wizardOpen, wizardMode, wizardSiteId,
             createForm, createProgress, wpInstallStatuses,
             themes, selectedThemeIds, selectedPluginIds, step2Installing, step2Results,
+            feedSiteId, feedProducts, showFeedProductModal, feedEditId, feedEditForm,
             cfConnected, cfToken, cfEmail, cfKey, cfAuthMode, cfZones, cfSelectedZone, cfProxied, cfServerIp, cfCreating, cfDnsResult,
             cfAccounts, cfSelectedAccountId,
             showEditModal, editForm, editingSiteId, globalConfig,
@@ -397,6 +456,8 @@ const app = createApp({
             openEditModal, submitEdit, confirmDelete, fixSiteWebsite, saveGlobalConfig, exportCSV,
             loadPlugins, handlePluginUpload, handleDeletePlugin, handleTogglePlugin,
             loadThemes, handleThemeUpload, handleDeleteTheme,
+            loadFeedProducts, openFeedProductModal, closeFeedProductModal, handleSaveFeedProduct,
+            handleDeleteFeedProduct, handleImportSampleProducts, handleExportFeed,
             cfVerify, loadCfZones, cfCreateDns, loadCfAccounts, handleDeleteCfAccount, handleSetDefaultCfAccount,
             showToast, showModal,
         };
@@ -430,6 +491,7 @@ const app = createApp({
                 <a @click="openWizard('single')" class="flex items-center gap-3 px-4 py-3 rounded-lg cursor-pointer transition hover:bg-white hover:bg-opacity-10"><i class="fas fa-plus-circle w-5 text-center"></i><span>创建站点</span></a>
                 <a @click="currentPage = 'plugins'" :class="['flex items-center gap-3 px-4 py-3 rounded-lg cursor-pointer transition', currentPage === 'plugins' ? 'bg-white bg-opacity-20' : 'hover:bg-white hover:bg-opacity-10']"><i class="fas fa-plug w-5 text-center"></i><span>插件管理</span><span class="ml-auto bg-indigo-500 text-xs px-2 py-0.5 rounded-full">{{ plugins.length }}</span></a>
                 <a @click="currentPage = 'themes'" :class="['flex items-center gap-3 px-4 py-3 rounded-lg cursor-pointer transition', currentPage === 'themes' ? 'bg-white bg-opacity-20' : 'hover:bg-white hover:bg-opacity-10']"><i class="fas fa-palette w-5 text-center"></i><span>主题管理</span><span class="ml-auto bg-indigo-500 text-xs px-2 py-0.5 rounded-full">{{ themes.length }}</span></a>
+                <a @click="currentPage = 'feed'" :class="['flex items-center gap-3 px-4 py-3 rounded-lg cursor-pointer transition', currentPage === 'feed' ? 'bg-white bg-opacity-20' : 'hover:bg-white hover:bg-opacity-10']"><i class="fas fa-tags w-5 text-center"></i><span>商品Feed</span><span class="ml-auto bg-indigo-500 text-xs px-2 py-0.5 rounded-full">{{ feedProducts.length }}</span></a>
                 <a @click="currentPage = 'settings'" :class="['flex items-center gap-3 px-4 py-3 rounded-lg cursor-pointer transition', currentPage === 'settings' ? 'bg-white bg-opacity-20' : 'hover:bg-white hover:bg-opacity-10']"><i class="fas fa-cog w-5 text-center"></i><span>系统设置</span></a>
             </nav>
             <div class="p-4 border-t border-indigo-700"><div class="flex items-center gap-3 px-2"><div class="w-8 h-8 bg-indigo-500 rounded-full flex items-center justify-center"><i class="fas fa-user text-sm"></i></div><div class="flex-1 min-w-0"><p class="text-sm font-medium truncate">{{ currentUser }}</p><p class="text-xs text-indigo-300">管理员</p></div><button @click="handleLogout" class="text-indigo-300 hover:text-white" title="退出登录"><i class="fas fa-sign-out-alt"></i></button></div></div>
@@ -438,7 +500,7 @@ const app = createApp({
         <!-- Main Content -->
         <main class="flex-1 overflow-auto">
             <header class="bg-white border-b px-8 py-4 flex items-center justify-between">
-                <div><h1 class="text-xl font-bold text-gray-800">{{ currentPage === 'dashboard' ? '仪表盘' : currentPage === 'sites' ? '站点列表' : currentPage === 'plugins' ? '插件管理' : currentPage === 'themes' ? '主题管理' : '系统设置' }}</h1><p class="text-sm text-gray-500"><span :class="panelConnected ? 'text-green-500' : 'text-red-500'"><i class="fas fa-circle text-xs mr-1"></i>{{ panelConnected ? '1Panel 已连接' : '1Panel 未连接' }}</span></p></div>
+                <div><h1 class="text-xl font-bold text-gray-800">{{ currentPage === 'dashboard' ? '仪表盘' : currentPage === 'sites' ? '站点列表' : currentPage === 'plugins' ? '插件管理' : currentPage === 'themes' ? '主题管理' : currentPage === 'feed' ? '商品Feed (GMC)' : '系统设置' }}</h1><p class="text-sm text-gray-500"><span :class="panelConnected ? 'text-green-500' : 'text-red-500'"><i class="fas fa-circle text-xs mr-1"></i>{{ panelConnected ? '1Panel 已连接' : '1Panel 未连接' }}</span></p></div>
                 <button @click="syncWithPanel" class="px-4 py-2 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 transition text-sm" title="从1Panel同步数据"><i class="fas fa-exchange-alt mr-2"></i>同步1Panel</button>
                 <button @click="refreshSites" class="px-4 py-2 border rounded-lg hover:bg-gray-50 transition text-sm"><i class="fas fa-sync-alt mr-2" :class="{'fa-spin': loading}"></i>刷新</button>
             </header>
@@ -521,6 +583,77 @@ const app = createApp({
                             <div class="flex-1 min-w-0"><p class="font-medium text-sm">{{ t.name }}</p><p class="text-xs text-gray-500">{{ t.filename }} · {{ formatSize(t.file_size) }}</p></div>
                             <button @click="handleDeleteTheme(t)" class="text-red-400 hover:text-red-600" title="删除"><i class="fas fa-trash"></i></button>
                         </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Feed Products (GMC) -->
+            <div v-if="currentPage === 'feed'" class="p-8 fade-in">
+                <div class="bg-white rounded-xl card-shadow overflow-hidden">
+                    <div class="p-6 border-b">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="font-semibold text-gray-800"><i class="fas fa-tags mr-2 text-green-500"></i>商品 Feed 管理</h3>
+                            <div class="flex items-center gap-3">
+                                <select v-model="feedSiteId" @change="loadFeedProducts" class="px-4 py-2 border rounded-lg text-sm focus:border-green-500">
+                                    <option value="">-- 选择站点 --</option>
+                                    <option v-for="s in sites" :key="s.id" :value="s.id">{{ s.site_name }}</option>
+                                </select>
+                                <button v-if="feedSiteId" @click="handleImportSampleProducts" class="px-3 py-2 bg-yellow-500 text-white rounded-lg text-sm hover:bg-yellow-600 transition"><i class="fas fa-download mr-1"></i>导入示例</button>
+                                <button v-if="feedSiteId" @click="openFeedProductModal(null)" class="px-4 py-2 bg-green-500 text-white rounded-lg text-sm hover:bg-green-600 transition"><i class="fas fa-plus mr-1"></i>添加商品</button>
+                                <button v-if="feedSiteId" @click="handleExportFeed" class="px-3 py-2 bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600 transition"><i class="fas fa-file-export mr-1"></i>导出XML</button>
+                            </div>
+                        </div>
+                        <p class="text-xs text-gray-500">每个站点独立管理商品 Feed，用于 Google Merchant Center 提交。选择站点后可添加、编辑、导入示例和导出 XML。</p>
+                    </div>
+                    <div v-if="!feedSiteId" class="p-12 text-center text-gray-400">
+                        <i class="fas fa-tags text-4xl mb-4"></i>
+                        <p>请先选择一个站点查看其商品 Feed</p>
+                    </div>
+                    <div v-else-if="!feedProducts.length" class="p-12 text-center text-gray-400">
+                        <i class="fas fa-box-open text-4xl mb-4"></i>
+                        <p>该站点暂无商品，点击「添加商品」或「导入示例」开始</p>
+                    </div>
+                    <div v-else class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead class="bg-gray-50 text-left text-xs text-gray-500 uppercase">
+                                <tr>
+                                    <th class="px-4 py-3">商品信息</th>
+                                    <th class="px-4 py-3">价格</th>
+                                    <th class="px-4 py-3">库存</th>
+                                    <th class="px-4 py-3">品牌 / GTIN</th>
+                                    <th class="px-4 py-3">分类</th>
+                                    <th class="px-4 py-3 text-right">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y">
+                                <tr v-for="p in feedProducts" :key="p.id" class="hover:bg-gray-50 transition">
+                                    <td class="px-4 py-3">
+                                        <div class="flex items-center gap-3">
+                                            <div class="w-10 h-10 rounded bg-gray-100 flex items-center justify-center overflow-hidden">
+                                                <img v-if="p.image_url" :src="p.image_url" class="w-full h-full object-cover" onerror="this.style.display='none'">
+                                                <i v-else class="fas fa-image text-gray-400"></i>
+                                            </div>
+                                            <div>
+                                                <p class="font-medium text-gray-800 truncate max-w-xs">{{ p.title }}</p>
+                                                <p class="text-xs text-gray-500">{{ p.mpn }}</p>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td class="px-4 py-3 font-medium">{{ p.price }}</td>
+                                    <td class="px-4 py-3">
+                                        <span :class="p.availability === 'in_stock' ? 'text-green-600' : p.availability === 'out_of_stock' ? 'text-red-600' : 'text-yellow-600'">
+                                            {{ p.availability === 'in_stock' ? '有货' : p.availability === 'out_of_stock' ? '缺货' : '预定' }}
+                                        </span>
+                                    </td>
+                                    <td class="px-4 py-3 text-xs text-gray-600">{{ p.brand }}<br>{{ p.gtin }}</td>
+                                    <td class="px-4 py-3 text-xs text-gray-600 max-w-xs truncate">{{ p.google_product_category }}</td>
+                                    <td class="px-4 py-3 text-right">
+                                        <button @click="openFeedProductModal(p)" class="text-blue-500 hover:text-blue-700 mr-2" title="编辑"><i class="fas fa-edit"></i></button>
+                                        <button @click="handleDeleteFeedProduct(p)" class="text-red-400 hover:text-red-600" title="删除"><i class="fas fa-trash"></i></button>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
             </div>
@@ -695,6 +828,38 @@ const app = createApp({
                     <div class="grid grid-cols-2 gap-4"><div><label class="block text-sm font-medium text-gray-700 mb-1">HTTP 用户名</label><input v-model="editForm.http_username" type="text" class="w-full px-4 py-2 border rounded-lg focus:border-indigo-500"></div><div><label class="block text-sm font-medium text-gray-700 mb-1">HTTP 密码</label><input v-model="editForm.http_password" type="text" class="w-full px-4 py-2 border rounded-lg focus:border-indigo-500"></div></div>
                 </div>
                 <div class="p-6 border-t flex gap-3 justify-end"><button @click="showEditModal = false" class="px-6 py-2 border rounded-lg hover:bg-gray-50">取消</button><button @click="submitEdit" :disabled="loading" class="btn-primary text-white px-6 py-2 rounded-lg"><i v-if="loading" class="fas fa-spinner fa-spin mr-2"></i>保存更改</button></div>
+            </div>
+        </div>
+
+        <!-- Feed Product Edit Modal -->
+        <div v-if="showFeedProductModal" class="fixed inset-0 z-50 flex items-center justify-center modal-overlay">
+            <div class="bg-white rounded-2xl shadow-2xl max-h-[90vh] overflow-y-auto w-full max-w-2xl mx-4 fade-in">
+                <div class="p-6 border-b flex items-center justify-between"><h2 class="text-lg font-bold">{{ feedEditId ? '编辑商品' : '添加商品' }}</h2><button @click="closeFeedProductModal" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times text-xl"></i></button></div>
+                <div class="p-6 space-y-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">商品标题 <span class="text-red-500">*</span></label><input v-model="feedEditForm.title" type="text" class="w-full px-4 py-2 border rounded-lg focus:border-green-500"></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">描述</label><textarea v-model="feedEditForm.description" rows="2" class="w-full px-4 py-2 border rounded-lg focus:border-green-500"></textarea></div>
+                    <div class="grid grid-cols-3 gap-4">
+                        <div><label class="block text-sm font-medium text-gray-700 mb-1">价格</label><input v-model="feedEditForm.price" placeholder="29.99 USD" type="text" class="w-full px-4 py-2 border rounded-lg focus:border-green-500"></div>
+                        <div><label class="block text-sm font-medium text-gray-700 mb-1">币种</label><select v-model="feedEditForm.currency" class="w-full px-4 py-2 border rounded-lg focus:border-green-500"><option value="USD">USD</option><option value="EUR">EUR</option><option value="GBP">GBP</option><option value="CNY">CNY</option></select></div>
+                        <div><label class="block text-sm font-medium text-gray-700 mb-1">库存状态</label><select v-model="feedEditForm.availability" class="w-full px-4 py-2 border rounded-lg focus:border-green-500"><option value="in_stock">有货 (in_stock)</option><option value="out_of_stock">缺货 (out_of_stock)</option><option value="preorder">预定 (preorder)</option></select></div>
+                    </div>
+                    <div class="grid grid-cols-3 gap-4">
+                        <div><label class="block text-sm font-medium text-gray-700 mb-1">品牌</label><input v-model="feedEditForm.brand" type="text" class="w-full px-4 py-2 border rounded-lg focus:border-green-500"></div>
+                        <div><label class="block text-sm font-medium text-gray-700 mb-1">GTIN</label><input v-model="feedEditForm.gtin" type="text" class="w-full px-4 py-2 border rounded-lg focus:border-green-500"></div>
+                        <div><label class="block text-sm font-medium text-gray-700 mb-1">MPN</label><input v-model="feedEditForm.mpn" type="text" class="w-full px-4 py-2 border rounded-lg focus:border-green-500"></div>
+                    </div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Google 商品类别</label><input v-model="feedEditForm.google_product_category" placeholder="Apparel & Accessories > Clothing > ..." type="text" class="w-full px-4 py-2 border rounded-lg focus:border-green-500"></div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div><label class="block text-sm font-medium text-gray-700 mb-1">商品类型</label><input v-model="feedEditForm.product_type" type="text" class="w-full px-4 py-2 border rounded-lg focus:border-green-500"></div>
+                        <div><label class="block text-sm font-medium text-gray-700 mb-1">状态</label><select v-model="feedEditForm.condition" class="w-full px-4 py-2 border rounded-lg focus:border-green-500"><option value="new">全新 (new)</option><option value="used">二手 (used)</option><option value="refurbished">翻新 (refurbished)</option></select></div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div><label class="block text-sm font-medium text-gray-700 mb-1">图片 URL</label><input v-model="feedEditForm.image_url" type="text" class="w-full px-4 py-2 border rounded-lg focus:border-green-500"></div>
+                        <div><label class="block text-sm font-medium text-gray-700 mb-1">商品链接</label><input v-model="feedEditForm.link" type="text" class="w-full px-4 py-2 border rounded-lg focus:border-green-500"></div>
+                    </div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">运费</label><input v-model="feedEditForm.shipping" placeholder="US:0.00 USD" type="text" class="w-full px-4 py-2 border rounded-lg focus:border-green-500"></div>
+                </div>
+                <div class="p-6 border-t flex gap-3 justify-end"><button @click="closeFeedProductModal" class="px-6 py-2 border rounded-lg hover:bg-gray-50">取消</button><button @click="handleSaveFeedProduct" class="bg-green-500 text-white px-6 py-2 rounded-lg hover:bg-green-600"><i class="fas fa-check mr-2"></i>{{ feedEditId ? '更新' : '添加' }}</button></div>
             </div>
         </div>
 
