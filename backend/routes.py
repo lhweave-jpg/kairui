@@ -707,6 +707,7 @@ def register_routes(app):
                 app_install_id=app_install_id,
                 website_group_id=group_id,
                 enable_ipv6=False,
+                port=port or 9000,
             )
             logger.info(f"Fix-website: create_website response: code={result.get('code')}, message={result.get('message','')[:200]}")
 
@@ -722,6 +723,7 @@ def register_routes(app):
                         app_install_id=app_install_id,
                         website_group_id=group_id,
                         enable_ipv6=False,
+                        port=port or 9000,
                     )
                     if result.get("code") == 200:
                         alias = unique_alias
@@ -916,15 +918,18 @@ def register_routes(app):
                 primary_domain=data.get("primaryDomain", ""),
                 alias=data.get("alias", ""),
                 app_type=data.get("appType", "installed"),
-                app_install_id=data.get("appInstallID"),
-                app_detail_id=data.get("appDetailID"),
-                app_id=data.get("appID"),
+                app_install_id=data.get("appInstallId"),
+                app_detail_id=data.get("appDetailId"),
+                app_id=data.get("appId"),
                 app_install_params=data.get("appInstallParams"),
                 services=data.get("services"),
-                website_group_id=data.get("webSiteGroupID", 1),
+                website_group_id=data.get("webSiteGroupId", 1),
                 remark=data.get("remark", ""),
                 enable_ipv6=data.get("enableIPV6", False),
                 proxy=data.get("proxy", ""),
+                port=data.get("port", 9000),
+                runtime_type=data.get("runtimeType", "php"),
+                domains=data.get("domains"),
             ))
         except Exception as e:
             logger.error(f"Panel create website failed: {e}")
@@ -1228,6 +1233,7 @@ def register_routes(app):
                                     services={s_db_service: s_db_service},
                                     website_group_id=s_group_id,
                                     enable_ipv6=False,
+                                    port=s_port,
                                 )
                                 logger.info(f"Step2: create_website response: code={website_result.get('code')}, message={website_result.get('message','')[:200]}")
                                 if website_result.get("code") == 200:
@@ -1246,6 +1252,7 @@ def register_routes(app):
                                         services={s_db_service: s_db_service},
                                         website_group_id=s_group_id,
                                         enable_ipv6=False,
+                                        port=s_port,
                                     )
                                     logger.info(f"Step2: Retry alias={unique_alias}: code={website_result.get('code')}")
                                     if website_result.get("code") == 200:
@@ -1345,6 +1352,7 @@ def register_routes(app):
                                         app_install_id=app_install_id,
                                         website_group_id=s_group_id,
                                         enable_ipv6=False,
+                                        port=s_port,
                                     )
                                     if website_result.get("code") == 200:
                                         break

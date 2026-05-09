@@ -201,15 +201,17 @@ class OnePanelClient:
         return self._request("POST", "/apps/installed/params/update", body)
 
     # ---- Websites ----
-    def search_websites(self, page=1, page_size=100, name="", order_by="created_at", order="descending"):
+    def search_websites(self, page=1, page_size=100, name="", order_by="favorite", order="descending",
+                        website_group_id=0, website_type=""):
         body = {
+            "name": name,
             "page": page,
             "pageSize": page_size,
-            "OrderBy": order_by,
-            "Order": order,
+            "orderBy": order_by,
+            "order": order,
+            "websiteGroupId": website_group_id,
+            "type": website_type,
         }
-        if name:
-            body["name"] = name
         return self._request("POST", "/websites/search", body)
 
     def get_websites_list(self):
@@ -229,55 +231,118 @@ class OnePanelClient:
         remark="",
         enable_ipv6=False,
         proxy="",
+        port=9000,
+        runtime_type="php",
+        domains=None,
     ):
         """Create a deployment website in 1Panel (一键部署).
-        
+
+        Request body matches 1Panel UI's actual fetch request exactly.
+
         For app_type="new": installs the app AND creates the website in ONE step.
-        This is the preferred approach — 1Panel handles OpenResty config automatically.
-        
         For app_type="installed": links an existing installed app to a domain.
-        
+
         Args:
             primary_domain: Main domain (e.g. "example.com")
-            alias: Site alias (e.g. "example-com"), must be unique across 1Panel
+            alias: Site alias (e.g. "example.com"), must be unique across 1Panel
             app_type: "new" (install app + create website) or "installed" (link existing app)
             app_install_id: ID of the installed app (required for app_type="installed")
             app_detail_id: App detail ID (required for app_type="new")
             app_id: App ID (for app_type="new")
-            app_install_params: Dict of install params for app_type="new" (PANEL_DB_*, PANEL_APP_PORT_HTTP, etc.)
-            services: Dict of service dependencies for app_type="new" (e.g. {"mariadb": "mariadb"})
+            app_install_params: Dict of install params for app_type="new"
+            services: Dict of service dependencies for app_type="new"
             website_group_id: Website group ID (default: 1)
             remark: Site remark/description
-            enable_ipv6: Enable IPv6 listening (default: True)
+            enable_ipv6: Enable IPv6 listening
             proxy: Proxy URL (optional)
+            port: Container port (default: 9000, as in 1Panel UI)
+            runtime_type: Runtime type (default: "php")
+            domains: List of domain dicts [{"domain":"...","host":"...","port":80,"ssl":false}]
         """
-        body = {
-            "type": "deployment",
-            "primaryDomain": primary_domain,
-            "alias": alias,
-            "webSiteGroupID": website_group_id,
-            "IPV6": enable_ipv6,
-            "appType": app_type,
-            "remark": remark,
+        import uuid
+
+        # Build domains list (1Panel UI always includes this)
+        domains_list = domains or []
+        if not domains_list and alias:
+            domains_list = [{
+                "domain": alias,
+                "host": alias,
+                "port": 80,
+                "ssl": False,
+            }]
+
+        # Build appinstall sub-object (1Panel UI always sends this, even for installed type)
+        app_install_body = {
+            "appId": app_id or 0,
+            "name": "",
+            "appDetailId": 0,
+            "params": {},
+            "version": "",
+            "appkey": "",
+            "advanced": False,
+            "cpuQuota": 0,
+            "memoryLimit": 0,
+            "memoryUnit": "MB",
+            "containerName": "",
+            "allowPort": False,
+            "format": "utf8mb4",
+            "collation": "",
         }
-        if app_type == "installed" and app_install_id:
-            body["appInstallID"] = app_install_id
-        elif app_type == "new":
-            app_install_body = {
-                "name": alias,
-                "appDetailID": app_detail_id,
-                "params": app_install_params or {},
-                "advanced": True,
-                "allowPort": True,
-                "pullImage": True,
-            }
-            if services:
-                app_install_body["services"] = services
-            body["appInstall"] = app_install_body
+
+        if app_type == "new":
+            app_install_body["name"] = alias
+            app_install_body["appDetailId"] = app_detail_id or 0
+            app_install_body["params"] = app_install_params or {}
+            app_install_body["advanced"] = True
+            app_install_body["allowPort"] = True
             if app_id:
-                body["appID"] = app_id
-        if proxy:
-            body["proxy"] = proxy
+                app_install_body["appId"] = app_id
+
+        # Build the complete request body matching 1Panel UI format exactly
+        body = {
+            "primaryDomain": primary_domain if app_type == "new" else "",
+            "type": "deployment",
+            "alias": alias,
+            "remark": remark,
+            "appType": app_type,
+            "webSiteGroupId": website_group_id,
+            "otherDomains": "",
+            "proxy": proxy or "",
+            "appinstall": app_install_body,
+            "IPV6": enable_ipv6,
+            "enableFtp": False,
+            "ftpUser": "",
+            "ftpPassword": "",
+            "proxyType": "tcp",
+            "port": port,
+            "proxyProtocol": "http://",
+            "proxyAddress": "",
+            "runtimeType": runtime_type,
+            "taskID": str(uuid.uuid4()),
+            "createDb": False,
+            "dbName": "",
+            "dbPassword": "",
+            "dbFormat": "utf8mb4",
+            "dbUser": "",
+            "dbType": "mysql",
+            "dbHost": "",
+            "enableSSL": False,
+            "domains": domains_list,
+            "siteDir": "",
+            "streamPorts": "",
+            "udp": False,
+            "name": "",
+            "algorithm": "",
+            "servers": [],
+        }
+
+        if app_type == "installed" and app_install_id:
+            body["appInstallId"] = app_install_id
+
+        # For "new" type, pass services via params if provided
+        if app_type == "new" and services:
+            body["appinstall"]["params"]["services"] = services
+
         return self._request("POST", "/websites", body)
 
     def check_website(self, primary_domain, app_type="installed", app_install_id=None, alias=""):
