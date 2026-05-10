@@ -251,20 +251,47 @@ const API = {
         return this.request('GET', url);
     },
 
-    async cfListDnsRecords(zoneId, accountId) {
-        let url = `/api/cloudflare/dns-records/${zoneId}`;
-        if (accountId) url += `?account_id=${accountId}`;
+    async cfListDnsRecords(zoneId, accountId, page = 1, perPage = 10) {
+        let url = `/api/cloudflare/dns-records/${zoneId}?page=${page}&per_page=${perPage}`;
+        if (accountId) url += `&account_id=${accountId}`;
         return this.request('GET', url);
+    },
+
+    async cfUpdateDnsRecord(zoneId, recordId, data) {
+        return this.request('PUT', `/api/cloudflare/dns-records/${zoneId}/${recordId}`, data);
+    },
+
+    async cfDeleteDnsRecord(zoneId, recordId, accountId) {
+        let url = `/api/cloudflare/dns-records/${zoneId}/${recordId}`;
+        if (accountId) url += `?account_id=${accountId}`;
+        return this.request('DELETE', url);
     },
 
     async cfCreateDns(siteId, data) {
         return this.request('POST', `/api/sites/${siteId}/dns`, data);
     },
 
+    async cfCreateDnsRecord(zoneId, data) {
+        return this.request('POST', `/api/cloudflare/dns-records/${zoneId}`, data);
+    },
+
     async cfStatus(accountId) {
         let url = '/api/cloudflare/status';
         if (accountId) url += `?account_id=${accountId}`;
         return this.request('GET', url);
+    },
+
+    // WordPress.com
+    async wpcomAuthUrl() {
+        return this.request('GET', '/api/wordpress-com/auth-url');
+    },
+
+    async wpcomStatus() {
+        return this.request('GET', '/api/wordpress-com/status');
+    },
+
+    async wpcomBindDomain(data) {
+        return this.request('POST', '/api/wordpress-com/bind-domain', data);
     },
 
     // Feed Products (Google Merchant Center)

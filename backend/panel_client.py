@@ -300,7 +300,7 @@ class OnePanelClient:
 
         # Build the complete request body matching 1Panel UI format exactly
         body = {
-            "primaryDomain": primary_domain if app_type == "new" else "",
+            "primaryDomain": primary_domain,
             "type": "deployment",
             "alias": alias,
             "remark": remark,
@@ -589,6 +589,26 @@ class OnePanelClient:
         if errors:
             return {"code": 207, "message": "; ".join(errors)}
         return {"code": 200, "message": "nginx配置已删除"}
+
+    # ---- Image Management ----
+    def search_images(self, page=1, page_size=100, name=""):
+        """Search Docker images in 1Panel."""
+        body = {"page": page, "pageSize": page_size}
+        if name:
+            body["name"] = name
+        return self._request("POST", "/images/search", body)
+
+    def clean_images(self):
+        """Clean up unused Docker images (prune dangling/unreferenced images).
+
+        This removes images that are no longer referenced by any container,
+        freeing up disk space after app deletions.
+        """
+        return self._request("POST", "/images/clean")
+
+    def delete_images(self, image_ids):
+        """Delete specific Docker images by their IDs."""
+        return self._request("POST", "/images/del", {"ids": image_ids})
 
 
 # Singleton instance

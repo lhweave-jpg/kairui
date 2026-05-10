@@ -161,6 +161,9 @@ def init_db():
         "db_service": "mariadb",
         "cf_api_token": "",
         "panel_server_ip": "",
+        "wpcom_token": "",
+        "wpcom_connected": "false",
+        "wpcom_email": "",
     }
     for key, value in defaults.items():
         cursor.execute(

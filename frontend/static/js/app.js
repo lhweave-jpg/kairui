@@ -48,7 +48,7 @@ const app = createApp({
         const step2Installing = ref(false);
         const step2Results = ref([]);
 
-        // Step 3
+        // Step 2 - Cloudflare DNS
         const cfConnected = ref(false);
         const cfToken = ref('');
         const cfEmail = ref('');
@@ -56,12 +56,30 @@ const app = createApp({
         const cfAuthMode = ref('token'); // 'token' or 'global'
         const cfZones = ref([]);
         const cfSelectedZone = ref('');
+        const cfDnsName = ref('');
         const cfProxied = ref(false);
         const cfServerIp = ref('');
         const cfCreating = ref(false);
         const cfDnsResult = ref(null);
         const cfAccounts = ref([]);
         const cfSelectedAccountId = ref('');
+        // DNS records list + edit
+        const cfDnsRecords = ref([]);
+        const cfDnsLoading = ref(false);
+        const cfDnsPage = ref(1);
+        const cfDnsPerPage = ref(10);
+        const cfDnsTotal = ref(0);
+        const cfDnsTotalPages = computed(() => Math.max(1, Math.ceil(cfDnsTotal.value / cfDnsPerPage.value)));
+        const cfSelectedDnsRecords = ref([]);
+        const cfEditingRecord = ref(null);
+        const cfEditForm = reactive({ type: 'A', name: '', content: '', ttl: 1, proxied: false });
+
+        // Step 3 - WordPress.com
+        const wpcomConnected = ref(false);
+        const wpcomEmail = ref('');
+        const wpcomBinding = ref(false);
+        const wpcomDomain = ref('');
+        const wpcomResult = ref(null);
 
         // Edit
         const showEditModal = ref(false);
@@ -266,15 +284,71 @@ const app = createApp({
             const accountId = cfSelectedAccountId.value;
             try { const resp = await API.cfListZones(accountId || undefined); if (resp.code === 200) cfZones.value = resp.data || []; } catch (e) {}
         }
-        async function cfCreateDns() {
-            if (!wizardSiteId.value) { showToast('请先完成站点创建', 'error'); return; }
+        async function loadCfDnsRecords(page = 1) {
+            if (!cfSelectedZone.value) { cfDnsRecords.value = []; return; }
+            cfDnsLoading.value = true;
+            cfDnsPage.value = page;
+            try {
+                const accountId = cfSelectedAccountId.value;
+                const resp = await API.cfListDnsRecords(cfSelectedZone.value, accountId || undefined, page, cfDnsPerPage.value);
+                if (resp.code === 200) {
+                    cfDnsRecords.value = resp.data || [];
+                    cfDnsTotal.value = resp.total || 0;
+                }
+            } catch (e) { cfDnsRecords.value = []; }
+            finally { cfDnsLoading.value = false; }
+        }
+        function cfGoToPage(page) { loadCfDnsRecords(page); }
+        function cfToggleDnsSelect(record) {
+            const idx = cfSelectedDnsRecords.value.findIndex(r => r.id === record.id);
+            if (idx >= 0) {
+                cfSelectedDnsRecords.value = cfSelectedDnsRecords.value.filter(r => r.id !== record.id);
+            } else {
+                cfSelectedDnsRecords.value = [...cfSelectedDnsRecords.value, record];
+            }
+        }
+        function cfStartEditRecord(record) {
+            cfEditingRecord.value = record;
+            cfEditForm.type = record.type || 'A';
+            cfEditForm.name = record.name || '';
+            cfEditForm.content = record.content || '';
+            cfEditForm.ttl = record.ttl || 1;
+            cfEditForm.proxied = record.proxied || false;
+        }
+        function cfCancelEdit() { cfEditingRecord.value = null; }
+        async function cfSaveEditRecord() {
+            if (!cfEditingRecord.value) return;
             cfCreating.value = true;
             try {
-                const data = { zone_id: cfSelectedZone.value, proxied: cfProxied.value };
-                if (cfServerIp.value) data.server_ip = cfServerIp.value;
+                const accountId = cfSelectedAccountId.value;
+                const resp = await API.cfUpdateDnsRecord(cfSelectedZone.value, cfEditingRecord.value.id, {
+                    type: cfEditForm.type, name: cfEditForm.name,
+                    content: cfEditForm.content, ttl: parseInt(cfEditForm.ttl) || 1,
+                    proxied: cfEditForm.proxied,
+                }, accountId || undefined);
+                if (resp.code === 200) { showToast('DNS记录已更新'); cfEditingRecord.value = null; await loadCfDnsRecords(); }
+                else { showToast(resp.message || '更新失败', 'error'); }
+            } catch (e) { showToast('更新失败', 'error'); } finally { cfCreating.value = false; }
+        }
+        async function cfDeleteDnsRecord(record) {
+            if (!confirm(`确定删除 DNS 记录 "${record.name}"？`)) return;
+            cfCreating.value = true;
+            try {
+                const accountId = cfSelectedAccountId.value;
+                const resp = await API.cfDeleteDnsRecord(cfSelectedZone.value, record.id, accountId || undefined);
+                if (resp.code === 200) { showToast('DNS记录已删除'); await loadCfDnsRecords(); }
+                else { showToast(resp.message || '删除失败', 'error'); }
+            } catch (e) { showToast('删除失败', 'error'); } finally { cfCreating.value = false; }
+        }
+        async function cfCreateDns() {
+            if (!cfSelectedZone.value) { showToast('请先选择域名区域', 'error'); return; }
+            if (!cfDnsName.value.trim()) { showToast('请输入DNS记录名称', 'error'); return; }
+            cfCreating.value = true;
+            try {
+                const data = { type: 'A', name: cfDnsName.value.trim(), content: cfServerIp.value, ttl: 1, proxied: cfProxied.value };
                 if (cfSelectedAccountId.value) data.account_id = cfSelectedAccountId.value;
-                const resp = await API.cfCreateDns(wizardSiteId.value, data);
-                if (resp.code === 200) { cfDnsResult.value = resp.data; showToast('DNS A记录创建成功！'); await loadSites(); }
+                const resp = await API.cfCreateDnsRecord(cfSelectedZone.value, data);
+                if (resp.code === 200) { cfDnsResult.value = resp.data; showToast('DNS A记录创建成功！'); await loadCfDnsRecords(); }
                 else { showToast(resp.message || 'DNS创建失败', 'error'); }
             } catch (e) { showToast('DNS创建失败', 'error'); } finally { cfCreating.value = false; }
         }
@@ -288,7 +362,22 @@ const app = createApp({
             if (resp.code === 200) { showToast('已设为默认账号'); await loadCfAccounts(); } else { showToast(resp.message || '设置失败', 'error'); }
         }
 
-        // ---- 3-Step Wizard ----
+        // ---- WordPress.com Functions ----
+        async function checkWpcomStatus() {
+            try { const r = await API.wpcomStatus(); if (r.code === 200) { wpcomConnected.value = r.data.connected; wpcomEmail.value = r.data.email || ''; } }
+            catch (e) { wpcomConnected.value = false; }
+        }
+        async function wpcomBindDomainFn() {
+            if (!wpcomDomain.value.trim()) { showToast('请输入或选择域名', 'error'); return; }
+            wpcomBinding.value = true;
+            try {
+                const resp = await API.wpcomBindDomain({ domain: wpcomDomain.value.trim() });
+                if (resp.code === 200) { wpcomResult.value = resp; showToast(resp.message || '域名已提交绑定'); }
+                else { showToast(resp.message || '域名绑定失败', 'error'); }
+            } catch (e) { showToast('域名绑定失败', 'error'); } finally { wpcomBinding.value = false; }
+        }
+
+        // ---- 4-Step Wizard ----
         function openWizard(mode = 'single') {
             wizardMode.value = mode; wizardStep.value = 1; wizardSiteId.value = null;
             createForm.site_name = ''; createForm.url = ''; createForm.admin_name = globalConfig.default_admin_name || 'admin';
@@ -297,12 +386,15 @@ const app = createApp({
             createForm.domains = ''; createForm.base_port = 8081;
             createProgress.show = false; createProgress.results = [];
             selectedThemeIds.value = []; selectedPluginIds.value = []; step2Results.value = [];
-            cfDnsResult.value = null; cfSelectedAccountId.value = '';
+            cfDnsResult.value = null; cfSelectedAccountId.value = ''; cfSelectedZone.value = ''; cfDnsName.value = ''; cfDnsRecords.value = []; cfDnsPage.value = 1; cfDnsTotal.value = 0; cfSelectedDnsRecords.value = []; cfEditingRecord.value = null;
+            wpcomDomain.value = ''; wpcomResult.value = null;
+            checkWpcomStatus();
+            loadCfAccounts(); loadCfZones();
             wizardOpen.value = true;
         }
         function closeWizard() { wizardOpen.value = false; loadSites(); loadPanelData(); }
 
-        // Step 1: Create site(s)
+        // Step 4: Create site(s)
         async function wizardCreateSite() {
             loading.value = true;
             try {
@@ -325,6 +417,8 @@ const app = createApp({
                     http_password: createForm.http_password, verify_certificate: createForm.verify_certificate,
                     ssl_version: createForm.ssl_version, base_port: createForm.base_port, db_service: createForm.db_service,
                     website_group_id: createForm.website_group_id || 1,
+                    theme_ids: selectedThemeIds.value.length ? selectedThemeIds.value : undefined,
+                    plugin_ids: selectedPluginIds.value.length ? selectedPluginIds.value : undefined,
                 });
                 if (resp.code !== 200) { createProgress.message = `创建失败: ${resp.message}`; showToast(`创建失败: ${resp.message}`, 'error'); loading.value = false; return; }
                 const results = resp.data.results || [];
@@ -350,33 +444,10 @@ const app = createApp({
                     else if (fs && fs.status === 'failed') { createProgress.message = `⚠️ 站点已创建，但WordPress安装未完成: ${fs.message}`; }
                     else { createProgress.message = `⏳ 站点部署已提交，1Panel正在处理...`; }
                     await loadSites();
-                    setTimeout(() => { wizardStep.value = 2; }, 1000);
+                    loading.value = false;
                 }
             } catch (e) { createProgress.message = `创建失败: ${e.message}`; showToast(`错误: ${e.message}`, 'error'); } finally { loading.value = false; }
         }
-
-        // Step 2: Install theme & plugins
-        async function wizardInstallThemeAndPlugins() {
-            if (!selectedThemeIds.value.length && !selectedPluginIds.value.length) { showToast('请至少选择一个主题或插件，或跳过此步骤', 'error'); return; }
-            step2Installing.value = true; step2Results.value = [];
-            try {
-                if (selectedThemeIds.value.length) {
-                    const resp = await API.installTheme(wizardSiteId.value, selectedThemeIds.value);
-                    if (resp.code === 200) step2Results.value.push(...(resp.data.results || []));
-                    else step2Results.value.push({ theme: '主题', status: 'error', message: resp.message });
-                }
-                if (selectedPluginIds.value.length) {
-                    const resp = await API.installPlugins(wizardSiteId.value, selectedPluginIds.value);
-                    if (resp.code === 200) step2Results.value.push(...(resp.data.results || []));
-                    else step2Results.value.push({ plugin: '插件', status: 'error', message: resp.message });
-                }
-                const sc = step2Results.value.filter(r => r.status === 'success').length;
-                showToast(`安装完成: ${sc}/${step2Results.value.length} 成功`);
-            } catch (e) { showToast('安装失败: ' + e.message, 'error'); } finally { step2Installing.value = false; }
-        }
-        function wizardSkipStep2() { wizardStep.value = 3; }
-        function wizardNextStep2() { wizardStep.value = 3; }
-        function wizardFinish() { closeWizard(); }
 
         // ---- WP Polling ----
         function startWPPolling(siteId, domain) {
@@ -446,13 +517,15 @@ const app = createApp({
             createForm, createProgress, wpInstallStatuses,
             themes, selectedThemeIds, selectedPluginIds, step2Installing, step2Results,
             feedSiteId, feedProducts, showFeedProductModal, feedEditId, feedEditForm,
-            cfConnected, cfToken, cfEmail, cfKey, cfAuthMode, cfZones, cfSelectedZone, cfProxied, cfServerIp, cfCreating, cfDnsResult,
-            cfAccounts, cfSelectedAccountId,
+            cfConnected, cfToken, cfEmail, cfKey, cfAuthMode, cfZones, cfSelectedZone, cfDnsName, cfProxied, cfServerIp, cfCreating, cfDnsResult,
+            cfAccounts, cfSelectedAccountId, cfDnsRecords, cfDnsLoading, cfDnsPage, cfDnsPerPage, cfDnsTotal, cfDnsTotalPages, cfSelectedDnsRecords, cfEditingRecord, cfEditForm,
+            wpcomConnected, wpcomEmail, wpcomBinding, wpcomDomain, wpcomResult,
             showEditModal, editForm, editingSiteId, globalConfig,
             plugins, uploadProgress, formatSize,
             handleLogin, handleLogout, refreshSites, syncWithPanel,
             openWizard, closeWizard, wizardCreateSite,
-            wizardInstallThemeAndPlugins, wizardSkipStep2, wizardNextStep2, wizardFinish,
+            loadCfDnsRecords, cfGoToPage, cfToggleDnsSelect, cfStartEditRecord, cfCancelEdit, cfSaveEditRecord, cfDeleteDnsRecord,
+            checkWpcomStatus, wpcomBindDomainFn,
             openEditModal, submitEdit, confirmDelete, fixSiteWebsite, saveGlobalConfig, exportCSV,
             loadPlugins, handlePluginUpload, handleDeletePlugin, handleTogglePlugin,
             loadThemes, handleThemeUpload, handleDeleteTheme,
@@ -574,7 +647,7 @@ const app = createApp({
                 <div class="bg-white rounded-xl card-shadow overflow-hidden">
                     <div class="p-6 border-b flex items-center justify-between">
                         <h3 class="font-semibold text-gray-800"><i class="fas fa-palette mr-2 text-orange-500"></i>主题库</h3>
-                        <label class="px-4 py-2 bg-orange-500 text-white rounded-lg cursor-pointer text-sm hover:bg-orange-600 transition"><i class="fas fa-upload mr-2"></i>上传主题<input type="file" accept=".zip" @change="handleThemeUpload" class="hidden"></label>
+                        <label class="btn-accent text-white px-4 py-2 rounded-lg cursor-pointer text-sm transition"><i class="fas fa-upload mr-2"></i>上传主题<input type="file" accept=".zip" @change="handleThemeUpload" class="hidden"></label>
                     </div>
                     <div v-if="!themes.length" class="p-12 text-center text-gray-400"><i class="fas fa-palette text-4xl mb-4"></i><p>暂无主题，请上传WordPress主题的.zip文件</p></div>
                     <div v-else class="divide-y">
@@ -707,29 +780,177 @@ const app = createApp({
                             </div>
                         </div>
                     </div>
+                    <div class="bg-white rounded-xl card-shadow p-6">
+                        <h3 class="font-semibold text-gray-800 mb-4"><i class="fab fa-wordpress mr-2 text-blue-500"></i>WordPress.com 连接</h3>
+                        <div class="space-y-4">
+                            <div class="flex items-center gap-3"><span :class="wpcomConnected ? 'text-green-500' : 'text-red-500'"><i class="fas fa-circle text-xs mr-1"></i>{{ wpcomConnected ? '已连接' : '未连接' }}</span><span v-if="wpcomConnected" class="text-sm text-gray-600">{{ wpcomEmail }}</span></div>
+                            <div v-if="!wpcomConnected" class="space-y-3">
+                                <p class="text-sm text-gray-600">连接 WordPress.com 后可在创建向导中绑定自定义域名。通过 OAuth2 授权，凭据全局保存，批量创建无需重复认证。</p>
+                                <button @click="async () => { const r = await API.wpcomAuthUrl(); if (r.code === 200 && r.data.url) { window.open(r.data.url, '_blank'); } else { showToast(r.message || '获取授权URL失败', 'error'); } }" class="bg-blue-500 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-600"><i class="fas fa-link mr-2"></i>连接 WordPress.com</button>
+                                <p class="text-xs text-gray-500">点击后将跳转到 WordPress.com 授权页面</p>
+                                <div class="bg-gray-50 rounded-lg p-3 mt-2"><p class="text-xs text-gray-600 mb-2">或手动输入 OAuth Code</p><div class="flex gap-2"><input id="wpcom-code-input" type="text" placeholder="粘贴授权码..." class="flex-1 px-3 py-2 border rounded-lg text-sm"><button @click="async () => { const code = document.getElementById('wpcom-code-input').value; if (!code.trim()) { showToast('请输入授权码', 'error'); return; } const r = await API.request('POST', '/api/wordpress-com/callback', { code: code.trim() }); if (r.code === 200) { wpcomConnected = true; wpcomEmail = r.data.email || ''; showToast('WordPress.com 连接成功'); } else { showToast(r.message || '连接失败', 'error'); } }" class="bg-blue-500 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-600">提交</button></div></div>
+                            </div>
+                            <div v-else class="space-y-2">
+                                <p class="text-sm text-green-700"><i class="fas fa-check-circle mr-1"></i>已成功连接到 WordPress.com</p>
+                                <button @click="checkWpcomStatus" class="text-sm text-blue-500 hover:text-blue-700"><i class="fas fa-sync-alt mr-1"></i>刷新状态</button>
+                            </div>
+                        </div>
+                    </div>
                     <button @click="saveGlobalConfig" :disabled="loading" class="w-full btn-primary text-white py-3 rounded-lg font-semibold"><i class="fas fa-save mr-2"></i>保存设置</button>
                 </div>
             </div>
         </main>
 
-        <!-- 3-Step Wizard Modal -->
+        <!-- 4-Step Wizard Modal -->
         <div v-if="wizardOpen" class="fixed inset-0 z-50 flex items-center justify-center modal-overlay">
             <div class="bg-white rounded-2xl shadow-2xl w-full max-w-3xl mx-4 max-h-[90vh] overflow-y-auto fade-in">
                 <div class="p-6 border-b">
                     <div class="flex items-center justify-between mb-4"><h2 class="text-lg font-bold">创建WordPress站点</h2><button @click="closeWizard" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times text-xl"></i></button></div>
                     <div class="flex items-center">
-                        <div class="flex items-center" :class="wizardStep >= 1 ? 'text-indigo-600' : 'text-gray-400'"><div class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold" :class="wizardStep >= 1 ? 'bg-indigo-600 text-white' : 'bg-gray-200'">1</div><span class="ml-2 text-sm font-medium">站点设置</span></div>
-                        <div class="flex-1 h-0.5 mx-3" :class="wizardStep >= 2 ? 'bg-indigo-600' : 'bg-gray-200'"></div>
-                        <div class="flex items-center" :class="wizardStep >= 2 ? 'text-indigo-600' : 'text-gray-400'"><div class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold" :class="wizardStep >= 2 ? 'bg-indigo-600 text-white' : 'bg-gray-200'">2</div><span class="ml-2 text-sm font-medium">主题 & 插件</span></div>
-                        <div class="flex-1 h-0.5 mx-3" :class="wizardStep >= 3 ? 'bg-indigo-600' : 'bg-gray-200'"></div>
-                        <div class="flex items-center" :class="wizardStep >= 3 ? 'text-indigo-600' : 'text-gray-400'"><div class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold" :class="wizardStep >= 3 ? 'bg-indigo-600 text-white' : 'bg-gray-200'">3</div><span class="ml-2 text-sm font-medium">DNS解析</span></div>
+                        <div class="flex items-center" :class="wizardStep >= 1 ? 'text-indigo-600' : 'text-gray-400'"><div class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold" :class="wizardStep >= 1 ? 'bg-indigo-600 text-white' : 'bg-gray-200'">1</div><span class="ml-2 text-sm font-medium">主题 & 插件</span></div>
+                        <div class="flex-1 h-0.5 mx-1" :class="wizardStep >= 2 ? 'bg-indigo-600' : 'bg-gray-200'"></div>
+                        <div class="flex items-center" :class="wizardStep >= 2 ? 'text-indigo-600' : 'text-gray-400'"><div class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold" :class="wizardStep >= 2 ? 'bg-indigo-600 text-white' : 'bg-gray-200'">2</div><span class="ml-2 text-sm font-medium">DNS解析</span></div>
+                        <div class="flex-1 h-0.5 mx-1" :class="wizardStep >= 3 ? 'bg-indigo-600' : 'bg-gray-200'"></div>
+                        <div class="flex items-center" :class="wizardStep >= 3 ? 'text-indigo-600' : 'text-gray-400'"><div class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold" :class="wizardStep >= 3 ? 'bg-indigo-600 text-white' : 'bg-gray-200'">3</div><span class="ml-2 text-sm font-medium">WordPress.com</span></div>
+                        <div class="flex-1 h-0.5 mx-1" :class="wizardStep >= 4 ? 'bg-indigo-600' : 'bg-gray-200'"></div>
+                        <div class="flex items-center" :class="wizardStep >= 4 ? 'text-indigo-600' : 'text-gray-400'"><div class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold" :class="wizardStep >= 4 ? 'bg-indigo-600 text-white' : 'bg-gray-200'">4</div><span class="ml-2 text-sm font-medium">创建站点</span></div>
                     </div>
                 </div>
 
-                <!-- Step 1 -->
+                <!-- Step 1: Choose Themes & Plugins -->
                 <div v-if="wizardStep === 1" class="p-6 space-y-4">
+                    <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-2"><p class="text-blue-700 text-sm"><i class="fas fa-info-circle mr-2"></i>选择要安装的主题和插件，将在站点创建后自动安装。</p></div>
+                    <div class="bg-gray-50 rounded-lg p-4">
+                        <div class="flex items-center justify-between mb-3"><h4 class="text-sm font-semibold text-gray-700"><i class="fas fa-palette mr-2 text-orange-500"></i>选择主题</h4><label class="btn-accent text-white text-xs px-3 py-1 rounded-lg cursor-pointer transition"><i class="fas fa-upload mr-1"></i>上传主题<input type="file" accept=".zip" @change="handleThemeUpload" class="hidden"></label></div>
+                        <div v-if="!themes.length" class="text-sm text-gray-400 py-2">暂无主题，请先上传 .zip 格式的WordPress主题</div>
+                        <div v-else class="space-y-2">
+                            <div v-for="t in themes" :key="t.id" @click="selectedThemeIds = selectedThemeIds.includes(t.id) ? selectedThemeIds.filter(id => id !== t.id) : [...selectedThemeIds, t.id]" :class="['flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition border', selectedThemeIds.includes(t.id) ? 'bg-orange-50 border-orange-300' : 'bg-white border-gray-200 hover:border-orange-200']"><i :class="[selectedThemeIds.includes(t.id) ? 'fas fa-check-square text-orange-600' : 'far fa-square text-gray-400']" class="text-lg"></i><div class="flex-1"><p class="text-sm font-medium">{{ t.name }}</p><p class="text-xs text-gray-500">{{ t.filename }} · {{ formatSize(t.file_size) }}</p></div></div>
+                        </div>
+                    </div>
+                    <div class="bg-gray-50 rounded-lg p-4">
+                        <div class="flex items-center justify-between mb-3"><h4 class="text-sm font-semibold text-gray-700"><i class="fas fa-plug mr-2 text-indigo-500"></i>选择插件</h4><label class="text-xs btn-primary text-white px-3 py-1 rounded-lg cursor-pointer"><i class="fas fa-upload mr-1"></i>上传插件<input type="file" accept=".zip" @change="handlePluginUpload" class="hidden"></label></div>
+                        <div v-if="!plugins.filter(p => p.enabled).length" class="text-sm text-gray-400 py-2">暂无可用插件，请先上传 .zip 格式的WordPress插件</div>
+                        <div v-else class="space-y-2">
+                            <div v-for="p in plugins.filter(p => p.enabled)" :key="p.id" @click="selectedPluginIds = selectedPluginIds.includes(p.id) ? selectedPluginIds.filter(id => id !== p.id) : [...selectedPluginIds, p.id]" :class="['flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition border', selectedPluginIds.includes(p.id) ? 'bg-indigo-50 border-indigo-300' : 'bg-white border-gray-200 hover:border-indigo-200']"><i :class="[selectedPluginIds.includes(p.id) ? 'fas fa-check-square text-indigo-600' : 'far fa-square text-gray-400']" class="text-lg"></i><div class="flex-1"><p class="text-sm font-medium">{{ p.name }}</p><p class="text-xs text-gray-500">{{ p.filename }} · {{ formatSize(p.file_size) }}</p></div></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Step 2: Cloudflare DNS Management -->
+                <div v-if="wizardStep === 2" class="p-6 space-y-4">
+                    <div v-if="!cfConnected" class="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-2">
+                        <p class="text-yellow-700 text-sm mb-3"><i class="fas fa-exclamation-triangle mr-2"></i>Cloudflare未授权。授权后可查看和配置DNS解析。</p>
+                        <div class="flex gap-2 mb-2">
+                            <button @click="cfAuthMode='token'" :class="cfAuthMode==='token' ? 'bg-orange-500 text-white' : 'bg-gray-100 text-gray-600'" class="px-3 py-1.5 rounded-lg text-sm font-medium">API Token</button>
+                            <button @click="cfAuthMode='global'" :class="cfAuthMode==='global' ? 'bg-orange-500 text-white' : 'bg-gray-100 text-gray-600'" class="px-3 py-1.5 rounded-lg text-sm font-medium">Global API Key</button>
+                        </div>
+                        <div v-if="cfAuthMode==='token'" class="flex gap-2"><input v-model="cfToken" type="password" placeholder="输入Cloudflare API Token" class="flex-1 px-3 py-2 border rounded-lg text-sm focus:border-indigo-500"><button @click="cfVerify" :disabled="loading" class="bg-orange-500 text-white px-4 py-2 rounded-lg text-sm hover:bg-orange-600"><i class="fas fa-check mr-1"></i>验证</button></div>
+                        <div v-if="cfAuthMode==='global'" class="space-y-2">
+                            <input v-model="cfEmail" type="email" placeholder="Cloudflare账户邮箱" class="w-full px-3 py-2 border rounded-lg text-sm focus:border-indigo-500">
+                            <div class="flex gap-2"><input v-model="cfKey" type="password" placeholder="输入Global API Key" class="flex-1 px-3 py-2 border rounded-lg text-sm focus:border-indigo-500"><button @click="cfVerify" :disabled="loading" class="bg-orange-500 text-white px-4 py-2 rounded-lg text-sm hover:bg-orange-600"><i class="fas fa-check mr-1"></i>验证</button></div>
+                        </div>
+                        <p class="text-xs text-gray-500 mt-2">Cloudflare控制台 → My Profile → API Tokens</p>
+                    </div>
+                    <div v-else class="space-y-4">
+                        <div class="bg-green-50 border border-green-200 rounded-lg p-4"><p class="text-green-700 text-sm"><i class="fab fa-cloudflare mr-2"></i>Cloudflare已连接</p></div>
+                        <div v-if="cfAccounts.length > 1"><label class="block text-sm font-medium text-gray-700 mb-1">选择Cloudflare账号</label><select v-model="cfSelectedAccountId" @change="loadCfZones" class="w-full px-4 py-3 border rounded-lg focus:border-indigo-500"><option value="">默认账号</option><option v-for="acc in cfAccounts" :key="acc.id" :value="acc.id">{{ acc.name }} <span class="text-xs text-gray-400">({{ acc.auth_type === 'global' ? acc.api_email : 'API Token' }})</span></option></select></div>
+                        <div><label class="block text-sm font-medium text-gray-700 mb-1">选择域名区域</label><select v-model="cfSelectedZone" @change="loadCfDnsRecords" class="w-full px-4 py-3 border rounded-lg focus:border-indigo-500"><option value="">-- 选择 Zone --</option><option v-for="z in cfZones" :key="z.id" :value="z.id">{{ z.name }}</option></select></div>
+                        <!-- DNS Records List -->
+                        <div v-if="cfSelectedZone" class="bg-gray-50 rounded-lg p-4">
+                            <div class="flex items-center justify-between mb-3">
+                                <h4 class="text-sm font-semibold text-gray-700"><i class="fas fa-list mr-2 text-orange-500"></i>DNS 记录</h4>
+                                <button @click="loadCfDnsRecords" :disabled="cfDnsLoading" class="text-xs px-3 py-1 bg-orange-500 text-white rounded-lg hover:bg-orange-600"><i :class="cfDnsLoading ? 'fas fa-spinner fa-spin' : 'fas fa-sync-alt'"></i><span class="ml-1">刷新</span></button>
+                            </div>
+                            <div v-if="cfDnsLoading" class="text-center text-gray-400 py-4"><i class="fas fa-spinner fa-spin mr-2"></i>加载中...</div>
+                            <div v-else-if="!cfDnsRecords.length" class="text-center text-gray-400 py-4">暂无DNS记录</div>
+                            <div v-else class="space-y-1">
+                                <div v-for="r in cfDnsRecords" :key="r.id" class="flex items-center justify-between px-3 py-2 bg-white rounded-lg border text-sm" :class="cfSelectedDnsRecords.some(s => s.id === r.id) ? 'border-orange-300 bg-orange-50' : 'border-gray-200'">
+                                    <div class="flex items-center gap-3">
+                                        <input type="checkbox" :checked="cfSelectedDnsRecords.some(s => s.id === r.id)" @change="cfToggleDnsSelect(r)" class="w-4 h-4 text-orange-500 rounded cursor-pointer">
+                                        <span class="w-10 text-xs font-mono font-bold text-gray-500">{{ r.type }}</span>
+                                        <span class="font-medium text-gray-700">{{ r.name }}</span>
+                                        <span class="text-gray-500 font-mono text-xs">{{ r.content }}</span>
+                                        <span v-if="r.proxied" class="text-xs bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded">已代理</span>
+                                        <span class="text-xs text-gray-400">TTL: {{ r.ttl === 1 ? 'Auto' : r.ttl }}</span>
+                                    </div>
+                                    <div class="flex gap-1">
+                                        <button @click="cfStartEditRecord(r)" class="text-blue-500 hover:text-blue-700 text-xs px-2 py-1" title="编辑"><i class="fas fa-edit"></i></button>
+                                        <button @click="cfDeleteDnsRecord(r)" class="text-red-400 hover:text-red-600 text-xs px-2 py-1" title="删除"><i class="fas fa-trash"></i></button>
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- Pagination -->
+                            <div v-if="cfDnsTotalPages > 1" class="flex items-center justify-between pt-2">
+                                <span class="text-xs text-gray-500">共 {{ cfDnsTotal }} 条, {{ cfSelectedDnsRecords.length }} 条已选</span>
+                                <div class="flex items-center gap-1">
+                                    <button @click="cfGoToPage(1)" :disabled="cfDnsPage <= 1" class="px-2 py-1 text-xs rounded border hover:bg-gray-100" :class="cfDnsPage <= 1 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600'"><i class="fas fa-angle-double-left"></i></button>
+                                    <button @click="cfGoToPage(cfDnsPage - 1)" :disabled="cfDnsPage <= 1" class="px-2 py-1 text-xs rounded border hover:bg-gray-100" :class="cfDnsPage <= 1 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600'"><i class="fas fa-angle-left"></i></button>
+                                    <span class="px-2 text-xs text-gray-600">{{ cfDnsPage }} / {{ cfDnsTotalPages }}</span>
+                                    <button @click="cfGoToPage(cfDnsPage + 1)" :disabled="cfDnsPage >= cfDnsTotalPages" class="px-2 py-1 text-xs rounded border hover:bg-gray-100" :class="cfDnsPage >= cfDnsTotalPages ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600'"><i class="fas fa-angle-right"></i></button>
+                                    <button @click="cfGoToPage(cfDnsTotalPages)" :disabled="cfDnsPage >= cfDnsTotalPages" class="px-2 py-1 text-xs rounded border hover:bg-gray-100" :class="cfDnsPage >= cfDnsTotalPages ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600'"><i class="fas fa-angle-double-right"></i></button>
+                                </div>
+                            </div>
+                            <div v-else class="text-xs text-gray-400 pt-1">{{ cfSelectedDnsRecords.length ? '已选 ' + cfSelectedDnsRecords.length + ' 条' : '' }}</div>
+                        </div>
+                        <!-- Edit DNS Record Form -->
+                        <div v-if="cfEditingRecord" class="bg-blue-50 border border-blue-300 rounded-lg p-4">
+                            <h4 class="text-sm font-semibold text-blue-800 mb-3"><i class="fas fa-edit mr-2"></i>编辑 DNS 记录: {{ cfEditingRecord.name }}</h4>
+                            <div class="grid grid-cols-2 gap-3 mb-3">
+                                <div><label class="block text-xs font-medium text-gray-600 mb-1">类型</label><select v-model="cfEditForm.type" class="w-full px-3 py-2 border rounded-lg text-sm"><option value="A">A</option><option value="AAAA">AAAA</option><option value="CNAME">CNAME</option><option value="MX">MX</option><option value="TXT">TXT</option><option value="NS">NS</option></select></div>
+                                <div><label class="block text-xs font-medium text-gray-600 mb-1">名称</label><input v-model="cfEditForm.name" type="text" class="w-full px-3 py-2 border rounded-lg text-sm"></div>
+                                <div><label class="block text-xs font-medium text-gray-600 mb-1">内容</label><input v-model="cfEditForm.content" type="text" class="w-full px-3 py-2 border rounded-lg text-sm"></div>
+                                <div><label class="block text-xs font-medium text-gray-600 mb-1">TTL</label><select v-model.number="cfEditForm.ttl" class="w-full px-3 py-2 border rounded-lg text-sm"><option :value="1">Auto</option><option :value="60">60</option><option :value="120">120</option><option :value="300">300</option><option :value="600">600</option><option :value="1800">1800</option><option :value="3600">3600</option></select></div>
+                            </div>
+                            <div class="flex items-center gap-3 mb-3"><label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" v-model="cfEditForm.proxied" class="w-4 h-4 text-blue-600 rounded"><span class="text-sm text-gray-700">Cloudflare 代理</span></label></div>
+                            <div class="flex gap-2"><button @click="cfSaveEditRecord" :disabled="cfCreating" class="bg-blue-500 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-600"><i v-if="cfCreating" class="fas fa-spinner fa-spin mr-1"></i>保存</button><button @click="cfCancelEdit" class="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button></div>
+                        </div>
+                        <!-- Add New DNS Record -->
+                        <div class="bg-gray-50 rounded-lg p-4">
+                            <h4 class="text-sm font-semibold text-gray-700 mb-3"><i class="fas fa-plus-circle mr-2 text-green-500"></i>新增 DNS A 记录</h4>
+                            <div class="space-y-3">
+                                <div><label class="block text-sm font-medium text-gray-700 mb-1">记录名称</label><input v-model="cfDnsName" type="text" placeholder="例如: @ 或 www 或 subdomain" class="w-full px-4 py-3 border rounded-lg focus:border-indigo-500"></div>
+                                <div><label class="block text-sm font-medium text-gray-700 mb-1">服务器IP（可选）</label><input v-model="cfServerIp" type="text" placeholder="留空则使用1Panel主机IP" class="w-full px-4 py-3 border rounded-lg focus:border-indigo-500"></div>
+                                <div class="flex items-center gap-3"><label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" v-model="cfProxied" class="w-4 h-4 text-indigo-600 rounded"><span class="text-sm text-gray-700">启用Cloudflare代理（橙色云朵）</span></label></div>
+                                <button @click="cfCreateDns" :disabled="cfCreating" class="bg-orange-500 text-white px-4 py-2 rounded-lg text-sm hover:bg-orange-600"><i v-if="cfCreating" class="fas fa-spinner fa-spin mr-1"></i><i v-else class="fab fa-cloudflare mr-1"></i>创建DNS记录</button>
+                            </div>
+                            <div v-if="cfDnsResult" class="bg-green-50 border border-green-200 rounded-lg p-4 mt-3"><p class="text-green-700 text-sm"><i class="fas fa-check-circle mr-2"></i>DNS A记录创建成功！</p><div class="mt-2 text-xs text-gray-600 space-y-1"><p>类型: {{ cfDnsResult.type }}</p><p>名称: {{ cfDnsResult.name }}</p><p>内容: {{ cfDnsResult.content }}</p><p>代理: {{ cfDnsResult.proxied ? '是' : '否' }}</p></div></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Step 3: WordPress.com Domain Binding -->
+                <div v-if="wizardStep === 3" class="p-6 space-y-4">
+                    <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-2"><p class="text-blue-700 text-sm"><i class="fas fa-info-circle mr-2"></i>绑定自定义域名到 WordPress.com，需先在"系统设置"中配置 WordPress.com 连接。</p></div>
+                    <div v-if="!wpcomConnected" class="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                        <p class="text-yellow-700 text-sm mb-2"><i class="fas fa-exclamation-triangle mr-2"></i>WordPress.com 未连接</p>
+                        <p class="text-xs text-gray-600">请前往 <a @click="checkWpcomStatus" class="text-indigo-600 hover:underline cursor-pointer">系统设置</a> 配置 WordPress.com 连接后再使用此功能。</p>
+                    </div>
+                    <div v-else class="space-y-4">
+                        <div class="bg-green-50 border border-green-200 rounded-lg p-4"><p class="text-green-700 text-sm"><i class="fas fa-check-circle mr-2"></i>WordPress.com 已连接 — {{ wpcomEmail }}</p></div>
+                        <div v-if="cfSelectedDnsRecords.length" class="bg-gray-50 rounded-lg p-3">
+                            <p class="text-sm font-medium text-gray-700 mb-2">从 Step 2 已选 DNS 记录中快速选择:</p>
+                            <div class="flex flex-wrap gap-2">
+                                <button v-for="r in cfSelectedDnsRecords" :key="r.id" @click="wpcomDomain = r.name" :class="wpcomDomain === r.name ? 'bg-blue-500 text-white' : 'bg-white text-gray-700 border hover:border-blue-400'" class="px-3 py-1.5 rounded-lg text-xs transition">
+                                    <span class="font-mono text-current opacity-60 mr-1">{{ r.type }}</span>{{ r.name }}
+                                </button>
+                            </div>
+                        </div>
+                        <div><label class="block text-sm font-medium text-gray-700 mb-1">要绑定的域名</label><input v-model="wpcomDomain" type="text" :placeholder="wizardMode === 'single' ? createForm.site_name || '输入域名...' : '输入域名...'" class="w-full px-4 py-3 border rounded-lg focus:border-indigo-500"><p class="text-xs text-gray-500 mt-1">输入在 Cloudflare 中已配置的域名，或从上方的 DNS 记录中选择</p></div>
+                        <button @click="wpcomBindDomainFn" :disabled="wpcomBinding || !wpcomDomain.trim()" class="bg-blue-500 text-white px-6 py-2 rounded-lg hover:bg-blue-600 text-sm"><i v-if="wpcomBinding" class="fas fa-spinner fa-spin mr-2"></i><i v-else class="fas fa-link mr-2"></i>绑定到 WordPress.com</button>
+                        <div v-if="wpcomResult" class="bg-green-50 border border-green-200 rounded-lg p-4"><p class="text-green-700 text-sm"><i class="fas fa-check-circle mr-2"></i>{{ wpcomResult.message || '域名绑定请求已提交' }}</p></div>
+                    </div>
+                </div>
+
+                <!-- Step 4: Create Site -->
+                <div v-if="wizardStep === 4" class="p-6 space-y-4">
                     <div v-if="!panelConnected" class="bg-red-50 border border-red-200 rounded-lg p-4"><p class="text-red-700 text-sm"><i class="fas fa-exclamation-triangle mr-2"></i>1Panel未连接，站点将仅保存到本地。</p></div>
                     <div v-else class="bg-green-50 border border-green-200 rounded-lg p-4"><p class="text-green-700 text-sm"><i class="fas fa-check-circle mr-2"></i>1Panel已连接，将通过API实际安装WordPress。</p></div>
+                    <!-- Selected themes/plugins summary -->
+                    <div v-if="selectedThemeIds.length || selectedPluginIds.length" class="bg-indigo-50 border border-indigo-200 rounded-lg p-3">
+                        <p class="text-sm font-medium text-indigo-700 mb-1"><i class="fas fa-check-circle mr-1"></i>已选配置</p>
+                        <p v-if="selectedThemeIds.length" class="text-xs text-indigo-600">主题: {{ selectedThemeIds.length }} 个</p>
+                        <p v-if="selectedPluginIds.length" class="text-xs text-indigo-600">插件: {{ selectedPluginIds.length }} 个</p>
+                    </div>
                     <!-- Single mode: one domain -->
                     <div v-if="wizardMode === 'single'"><label class="block text-sm font-medium text-gray-700 mb-1">域名 / 站点名称</label><input v-model="createForm.site_name" type="text" placeholder="例如: site1.example.com" class="w-full px-4 py-3 border rounded-lg focus:border-indigo-500"><p class="text-xs text-gray-500 mt-1">将作为WordPress站点的主域名</p></div>
                     <!-- Batch mode: multiple domains -->
@@ -745,72 +966,19 @@ const app = createApp({
                     </div>
                 </div>
 
-                <!-- Step 2 -->
-                <div v-if="wizardStep === 2" class="p-6 space-y-4">
-                    <div class="bg-green-50 border border-green-200 rounded-lg p-4 mb-2"><p class="text-green-700 text-sm"><i class="fas fa-check-circle mr-2"></i>站点已创建成功！现在可以上传并安装主题和插件。</p></div>
-                    <div class="bg-gray-50 rounded-lg p-4">
-                        <div class="flex items-center justify-between mb-3"><h4 class="text-sm font-semibold text-gray-700"><i class="fas fa-palette mr-2 text-orange-500"></i>安装主题</h4><label class="text-xs bg-orange-500 text-white px-3 py-1 rounded-lg cursor-pointer hover:bg-orange-600 transition"><i class="fas fa-upload mr-1"></i>上传主题<input type="file" accept=".zip" @change="handleThemeUpload" class="hidden"></label></div>
-                        <div v-if="!themes.length" class="text-sm text-gray-400 py-2">暂无主题，请先上传 .zip 格式的WordPress主题</div>
-                        <div v-else class="space-y-2">
-                            <div v-for="t in themes" :key="t.id" @click="selectedThemeIds = selectedThemeIds.includes(t.id) ? selectedThemeIds.filter(id => id !== t.id) : [...selectedThemeIds, t.id]" :class="['flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition border', selectedThemeIds.includes(t.id) ? 'bg-orange-50 border-orange-300' : 'bg-white border-gray-200 hover:border-orange-200']"><i :class="[selectedThemeIds.includes(t.id) ? 'fas fa-check-square text-orange-600' : 'far fa-square text-gray-400']" class="text-lg"></i><div class="flex-1"><p class="text-sm font-medium">{{ t.name }}</p><p class="text-xs text-gray-500">{{ t.filename }} · {{ formatSize(t.file_size) }}</p></div></div>
-                        </div>
-                    </div>
-                    <div class="bg-gray-50 rounded-lg p-4">
-                        <div class="flex items-center justify-between mb-3"><h4 class="text-sm font-semibold text-gray-700"><i class="fas fa-plug mr-2 text-indigo-500"></i>安装插件</h4><label class="text-xs btn-primary text-white px-3 py-1 rounded-lg cursor-pointer"><i class="fas fa-upload mr-1"></i>上传插件<input type="file" accept=".zip" @change="handlePluginUpload" class="hidden"></label></div>
-                        <div v-if="!plugins.filter(p => p.enabled).length" class="text-sm text-gray-400 py-2">暂无可用插件，请先上传 .zip 格式的WordPress插件</div>
-                        <div v-else class="space-y-2">
-                            <div v-for="p in plugins.filter(p => p.enabled)" :key="p.id" @click="selectedPluginIds = selectedPluginIds.includes(p.id) ? selectedPluginIds.filter(id => id !== p.id) : [...selectedPluginIds, p.id]" :class="['flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition border', selectedPluginIds.includes(p.id) ? 'bg-indigo-50 border-indigo-300' : 'bg-white border-gray-200 hover:border-indigo-200']"><i :class="[selectedPluginIds.includes(p.id) ? 'fas fa-check-square text-indigo-600' : 'far fa-square text-gray-400']" class="text-lg"></i><div class="flex-1"><p class="text-sm font-medium">{{ p.name }}</p><p class="text-xs text-gray-500">{{ p.filename }} · {{ formatSize(p.file_size) }}</p></div></div>
-                        </div>
-                    </div>
-                    <div v-if="step2Results.length" class="bg-gray-50 rounded-lg p-4"><h4 class="text-sm font-semibold text-gray-700 mb-2">安装结果</h4><div class="space-y-1"><div v-for="(r, i) in step2Results" :key="i" class="flex items-center gap-2 text-sm"><i :class="r.status === 'success' ? 'fas fa-check-circle text-green-500' : 'fas fa-exclamation-circle text-red-500'"></i><span>{{ r.theme || r.plugin || '项目' }}: {{ r.message }}</span></div></div></div>
-                    <div v-if="step2Installing" class="text-center text-indigo-600 text-sm"><i class="fas fa-spinner fa-spin mr-2"></i>正在安装主题和插件...</div>
-                </div>
-
-                <!-- Step 3 -->
-                <div v-if="wizardStep === 3" class="p-6 space-y-4">
-                    <div v-if="!cfConnected" class="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-2">
-                        <p class="text-yellow-700 text-sm mb-3"><i class="fas fa-exclamation-triangle mr-2"></i>Cloudflare未授权。授权后可自动配置DNS解析。</p>
-                        <div class="flex gap-2 mb-2">
-                            <button @click="cfAuthMode='token'" :class="cfAuthMode==='token' ? 'bg-orange-500 text-white' : 'bg-gray-100 text-gray-600'" class="px-3 py-1.5 rounded-lg text-sm font-medium">API Token</button>
-                            <button @click="cfAuthMode='global'" :class="cfAuthMode==='global' ? 'bg-orange-500 text-white' : 'bg-gray-100 text-gray-600'" class="px-3 py-1.5 rounded-lg text-sm font-medium">Global API Key</button>
-                        </div>
-                        <div v-if="cfAuthMode==='token'" class="flex gap-2"><input v-model="cfToken" type="password" placeholder="输入Cloudflare API Token" class="flex-1 px-3 py-2 border rounded-lg text-sm focus:border-indigo-500"><button @click="cfVerify" :disabled="loading" class="bg-orange-500 text-white px-4 py-2 rounded-lg text-sm hover:bg-orange-600"><i class="fas fa-check mr-1"></i>验证</button></div>
-                        <div v-if="cfAuthMode==='global'" class="space-y-2">
-                            <input v-model="cfEmail" type="email" placeholder="Cloudflare账户邮箱" class="w-full px-3 py-2 border rounded-lg text-sm focus:border-indigo-500">
-                            <div class="flex gap-2"><input v-model="cfKey" type="password" placeholder="输入Global API Key" class="flex-1 px-3 py-2 border rounded-lg text-sm focus:border-indigo-500"><button @click="cfVerify" :disabled="loading" class="bg-orange-500 text-white px-4 py-2 rounded-lg text-sm hover:bg-orange-600"><i class="fas fa-check mr-1"></i>验证</button></div>
-                        </div>
-                        <p class="text-xs text-gray-500 mt-2">Cloudflare控制台 → My Profile → API Tokens</p>
-                    </div>
-                    <div v-else class="space-y-4">
-                        <div class="bg-green-50 border border-green-200 rounded-lg p-4"><p class="text-green-700 text-sm"><i class="fab fa-cloudflare mr-2"></i>Cloudflare已连接，可以为站点自动创建DNS A记录。</p></div>
-                        <div v-if="cfAccounts.length > 1"><label class="block text-sm font-medium text-gray-700 mb-1">选择Cloudflare账号</label><select v-model="cfSelectedAccountId" @change="loadCfZones" class="w-full px-4 py-3 border rounded-lg focus:border-indigo-500"><option value="">默认账号</option><option v-for="acc in cfAccounts" :key="acc.id" :value="acc.id">{{ acc.name }} <span class="text-xs text-gray-400">({{ acc.auth_type === 'global' ? acc.api_email : 'API Token' }})</span></option></select></div>
-                        <div><label class="block text-sm font-medium text-gray-700 mb-1">选择域名区域</label><select v-model="cfSelectedZone" class="w-full px-4 py-3 border rounded-lg focus:border-indigo-500"><option value="">自动匹配</option><option v-for="z in cfZones" :key="z.id" :value="z.id">{{ z.name }}</option></select><p class="text-xs text-gray-500 mt-1">选择"自动匹配"将根据站点域名自动查找对应区域</p></div>
-                        <div><label class="block text-sm font-medium text-gray-700 mb-1">服务器IP（可选）</label><input v-model="cfServerIp" type="text" placeholder="留空则使用1Panel主机IP" class="w-full px-4 py-3 border rounded-lg focus:border-indigo-500"></div>
-                        <div class="flex items-center gap-3"><label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" v-model="cfProxied" class="w-4 h-4 text-indigo-600 rounded"><span class="text-sm text-gray-700">启用Cloudflare代理（橙色云朵）</span></label></div>
-                        <div v-if="cfDnsResult" class="bg-green-50 border border-green-200 rounded-lg p-4"><p class="text-green-700 text-sm"><i class="fas fa-check-circle mr-2"></i>DNS A记录创建成功！</p><div class="mt-2 text-xs text-gray-600 space-y-1"><p>类型: {{ cfDnsResult.type }}</p><p>名称: {{ cfDnsResult.name }}</p><p>内容: {{ cfDnsResult.content }}</p><p>代理: {{ cfDnsResult.proxied ? '是' : '否' }}</p></div></div>
-                        <div v-if="cfCreating" class="text-center text-orange-600 text-sm"><i class="fas fa-spinner fa-spin mr-2"></i>正在创建DNS记录...</div>
-                    </div>
-                </div>
-
                 <!-- Wizard Footer -->
                 <div class="p-6 border-t flex gap-3 justify-between">
                     <button v-if="wizardStep > 1" @click="wizardStep--" class="px-6 py-2 border rounded-lg hover:bg-gray-50"><i class="fas fa-arrow-left mr-2"></i>上一步</button>
                     <div v-else></div>
                     <div class="flex gap-3">
-                        <template v-if="wizardStep === 1">
+                        <template v-if="wizardStep < 4">
+                            <button @click="closeWizard" class="px-6 py-2 border rounded-lg hover:bg-gray-50">取消</button>
+                            <button @click="wizardStep++" class="btn-primary text-white px-6 py-2 rounded-lg">下一步 <i class="fas fa-arrow-right ml-2"></i></button>
+                        </template>
+                        <template v-if="wizardStep === 4">
                             <button @click="closeWizard" class="px-6 py-2 border rounded-lg hover:bg-gray-50">取消</button>
                             <button v-if="wizardMode === 'batch' && createProgress.results.length" @click="closeWizard" class="btn-primary text-white px-6 py-2 rounded-lg"><i class="fas fa-check mr-2"></i>完成</button>
                             <button v-else @click="wizardCreateSite" :disabled="loading || (createProgress.show && !createProgress.results.length)" class="btn-primary text-white px-6 py-2 rounded-lg"><i v-if="loading" class="fas fa-spinner fa-spin mr-2"></i><i v-else class="fas fa-rocket mr-2"></i>{{ wizardMode === 'batch' ? '批量创建' : '创建站点' }}</button>
-                        </template>
-                        <template v-if="wizardStep === 2">
-                            <button @click="wizardSkipStep2" class="px-6 py-2 border rounded-lg hover:bg-gray-50">跳过</button>
-                            <button v-if="!step2Installing && !step2Results.length" @click="wizardInstallThemeAndPlugins" :disabled="!selectedThemeIds.length && !selectedPluginIds.length" class="bg-orange-500 text-white px-6 py-2 rounded-lg hover:bg-orange-600"><i class="fas fa-download mr-2"></i>安装选中项</button>
-                            <button v-if="step2Results.length" @click="wizardNextStep2" class="btn-primary text-white px-6 py-2 rounded-lg">下一步 <i class="fas fa-arrow-right ml-2"></i></button>
-                        </template>
-                        <template v-if="wizardStep === 3">
-                            <button @click="wizardFinish" class="px-6 py-2 border rounded-lg hover:bg-gray-50">跳过</button>
-                            <button v-if="cfConnected && !cfDnsResult" @click="cfCreateDns" :disabled="cfCreating" class="bg-orange-500 text-white px-6 py-2 rounded-lg hover:bg-orange-600"><i class="fab fa-cloudflare mr-2"></i>创建DNS记录</button>
-                            <button v-if="cfDnsResult" @click="wizardFinish" class="btn-primary text-white px-6 py-2 rounded-lg"><i class="fas fa-check mr-2"></i>完成</button>
                         </template>
                     </div>
                 </div>

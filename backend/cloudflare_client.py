@@ -90,17 +90,18 @@ class CloudflareClient:
                 return resp["result"][0]
         return None
 
-    def list_dns_records(self, zone_id, record_type=None, name=None):
-        """List DNS records for a zone."""
+    def list_dns_records(self, zone_id, record_type=None, name=None, page=1, per_page=10):
+        """List DNS records for a zone with pagination."""
         params = []
         if record_type:
             params.append(f"type={record_type}")
         if name:
             params.append(f"name={name}")
+        params.append(f"page={page}")
+        params.append(f"per_page={per_page}")
+        params.append("order=type")
         qs = "&".join(params)
-        path = f"/zones/{zone_id}/dns_records"
-        if qs:
-            path += f"?{qs}"
+        path = f"/zones/{zone_id}/dns_records?{qs}"
         return self._request("GET", path)
 
     def create_dns_record(self, zone_id, record_type, name, content, proxied=False, ttl=1):
@@ -112,6 +113,10 @@ class CloudflareClient:
             "proxied": proxied,
             "ttl": ttl,
         })
+
+    def update_dns_record(self, zone_id, record_id, data):
+        """Update a DNS record. data may include: type, name, content, ttl, proxied."""
+        return self._request("PUT", f"/zones/{zone_id}/dns_records/{record_id}", data)
 
     def delete_dns_record(self, zone_id, record_id):
         """Delete a DNS record."""

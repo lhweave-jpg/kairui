@@ -2,6 +2,7 @@ import functools
 import json
 import logging
 import os
+from datetime import datetime
 import subprocess
 import threading
 import time
@@ -48,6 +49,7 @@ from models import (
     update_site_fields,
 )
 from panel_client import panel_client
+from wordpress_com_client import WordPressComClient
 
 logger = logging.getLogger(__name__)
 
@@ -306,24 +308,26 @@ def install_themes_to_site(site_url, admin_user, admin_password, theme_ids):
 
 def auto_install_wordpress(container_name, site_url, site_title, admin_user, admin_password, admin_email, port=None):
     """Auto-complete WordPress installation via HTTP POST to wp-admin/install.php.
-    
-    This bypasses the WordPress install page so the site is immediately usable.
-    Uses direct HTTP requests to the WordPress install endpoint.
+
+    Uses the domain-based Host header so WordPress sets siteurl/home to the
+    domain (without port), preventing browser redirects to domain:port.
     """
     import re
-    
-    # Determine the WordPress URL
+
+    # Determine the WordPress URL and Host header
     from config import config as app_config
     server_ip = app_config.PANEL_SERVER_IP
     wp_base_url = f"http://{server_ip}:{port}" if port else site_url
-    
-    logger.info(f"Starting WP auto-install for {site_url} (base: {wp_base_url})")
+    domain = site_url.replace("http://", "").replace("https://", "").rstrip("/")
+    host_headers = {"Host": domain}
+
+    logger.info(f"Starting WP auto-install for {site_url} (base: {wp_base_url}, Host: {domain})")
 
     # Wait for WordPress to be ready (up to 120 seconds)
     wp_ready = False
     for attempt in range(24):
         try:
-            resp = http_requests.get(f"{wp_base_url}/", timeout=10, allow_redirects=True)
+            resp = http_requests.get(f"{wp_base_url}/", timeout=10, allow_redirects=True, headers=host_headers)
             if resp.status_code == 200:
                 wp_ready = True
                 logger.info(f"WP ready after {(attempt+1)*5}s for {site_url}")
@@ -342,7 +346,7 @@ def auto_install_wordpress(container_name, site_url, site_title, admin_user, adm
 
     # Check if WordPress is already installed
     try:
-        resp = http_requests.get(f"{wp_base_url}/wp-admin/install.php", timeout=10, allow_redirects=True)
+        resp = http_requests.get(f"{wp_base_url}/wp-admin/install.php", timeout=10, allow_redirects=True, headers=host_headers)
         if "already installed" in resp.text.lower() or "已安装" in resp.text:
             logger.info(f"WordPress already installed for {site_url}")
             return {"success": True, "message": "WordPress已安装"}
@@ -355,6 +359,7 @@ def auto_install_wordpress(container_name, site_url, site_title, admin_user, adm
             f"{wp_base_url}/wp-admin/install.php?step=1",
             data={"language": "zh_CN"},
             timeout=30,
+            headers=host_headers,
         )
     except Exception:
         pass  # Language setup is optional
@@ -375,6 +380,7 @@ def auto_install_wordpress(container_name, site_url, site_title, admin_user, adm
             },
             timeout=60,
             allow_redirects=True,
+            headers=host_headers,
         )
 
         if install_resp.status_code == 200:
@@ -646,6 +652,16 @@ def register_routes(app):
                                 break
                 except Exception as e:
                     logger.warning(f"Failed to delete database {db_name}: {e}")
+
+            # Clean up unused Docker images (container removed but image remains)
+            try:
+                clean_resp = panel_client.clean_images()
+                if clean_resp.get("code") == 200:
+                    logger.info(f"Pruned unused Docker images after deleting site {site_id}")
+                else:
+                    logger.warning(f"Image prune returned: {clean_resp.get('message', '')[:100]}")
+            except Exception as e:
+                logger.warning(f"Failed to prune Docker images: {e}")
 
             delete_site(site_id)
             return jsonify({"code": 200, "message": "站点已删除"})
@@ -1035,6 +1051,7 @@ def register_routes(app):
             verify_cert = data.get("verify_certificate", True)
             ssl_version = data.get("ssl_version", "auto")
             plugin_ids = data.get("plugin_ids", [])
+            theme_ids = data.get("theme_ids", [])
 
             # Get WordPress app info
             app_resp = panel_client.get_app("wordpress")
@@ -1151,17 +1168,17 @@ def register_routes(app):
                 # ---- Background thread: full deployment pipeline ----
                 def _bg_deploy(task_id, sid, s_alias, s_domain, s_port, s_db_name, s_db_user, s_db_pass,
                                 s_app_detail_id, s_app_id, s_db_service, s_admin, s_password, s_plugin_ids,
-                                s_group_id):
+                                s_theme_ids, s_group_id):
                     """Full deployment pipeline in background with real-time status updates."""
                     # Push Flask application context for this thread
                     with app.app_context():
                         _bg_deploy_inner(task_id, sid, s_alias, s_domain, s_port, s_db_name, s_db_user, s_db_pass,
                                          s_app_detail_id, s_app_id, s_db_service, s_admin, s_password, s_plugin_ids,
-                                         s_group_id)
+                                         s_theme_ids, s_group_id)
 
                 def _bg_deploy_inner(task_id, sid, s_alias, s_domain, s_port, s_db_name, s_db_user, s_db_pass,
                                      s_app_detail_id, s_app_id, s_db_service, s_admin, s_password, s_plugin_ids,
-                                     s_group_id):
+                                     s_theme_ids, s_group_id):
                     """Inner deployment logic (runs inside Flask app context)."""
                     container_name = None
                     app_install_id = None
@@ -1212,9 +1229,7 @@ def register_routes(app):
                                            message=f"创建数据库 {s_db_name} 失败，请检查1Panel数据库服务")
                             return
 
-                        # === Step 2: Create website + install WordPress app (one-step via appType=new) ===
-                        update_bg_task(task_id, status="installing",
-                                       message="1Panel正在安装WordPress并创建网站...")
+                        # === Step 2: Create deployment website (primary: one-step appType=new) ===
                         install_params = {
                             "PANEL_DB_TYPE": s_db_service,
                             "PANEL_DB_HOST": s_db_service,
@@ -1224,8 +1239,13 @@ def register_routes(app):
                             "PANEL_APP_PORT_HTTP": str(s_port),
                         }
 
-                        # Try one-step creation (appType=new) first
                         website_result = None
+
+                        # --- Primary path: one-step create_website(appType=new) ---
+                        # This creates both the WordPress app AND the deployment website in one call.
+                        # 1Panel's OpenResty reverse proxy is properly configured this way.
+                        update_bg_task(task_id, status="installing",
+                                       message="1Panel正在安装WordPress并创建网站...")
                         for _attempt in range(3):
                             try:
                                 logger.info(f"Step2: One-step create website+app for {s_domain} (attempt {_attempt+1}/3)")
@@ -1241,10 +1261,9 @@ def register_routes(app):
                                     enable_ipv6=False,
                                     port=s_port,
                                 )
-                                logger.info(f"Step2: create_website response: code={website_result.get('code')}, message={website_result.get('message','')[:200]}")
+                                logger.info(f"Step2: create_website(new) response: code={website_result.get('code')}, message={website_result.get('message','')[:200]}")
                                 if website_result.get("code") == 200:
                                     break
-                                # If alias conflict, try with unique suffix
                                 if "标识已存在" in str(website_result.get("message", "")):
                                     unique_alias = f"{s_alias}-{_attempt+1}"
                                     logger.warning(f"Step2: Alias conflict, trying {unique_alias}")
@@ -1271,10 +1290,8 @@ def register_routes(app):
                                 time.sleep(5)
 
                         if website_result and website_result.get("code") == 200:
-                            # Wait for app to start
                             time.sleep(8)
-
-                            # Find the website and app IDs
+                            # Find the website and app IDs from search_websites response
                             try:
                                 ws = panel_client.search_websites(name=s_domain)
                                 if ws.get("code") == 200:
@@ -1288,7 +1305,6 @@ def register_routes(app):
                             except Exception as e:
                                 logger.warning(f"Step2: search_websites failed: {e}")
 
-                            # If we didn't get appInstallId from website, search apps
                             if not app_install_id:
                                 try:
                                     new_installed = panel_client.search_installed_apps(name=s_alias)
@@ -1303,16 +1319,15 @@ def register_routes(app):
                                 except Exception:
                                     pass
 
-                            update_bg_task(task_id, status="deploying",
-                                           message="1Panel已创建网站和WordPress应用，正在等待就绪...")
-                        else:
-                            # One-step creation failed, fall back to two-step approach
-                            error_msg = website_result.get('message', '未知错误') if website_result else '无响应'
-                            logger.warning(f"Step2: One-step creation failed ({error_msg}), falling back to two-step")
+                            if panel_website_id:
+                                update_bg_task(task_id, status="deploying",
+                                               message="1Panel已创建网站和WordPress应用，正在等待就绪...")
 
-                            # Fallback Step 2a: Install app first
+                        # --- Fallback path: install_app + create_website(appType=installed) ---
+                        if not (website_result and website_result.get("code") == 200 and panel_website_id):
+                            logger.warning(f"Step2: create_website(new) failed, falling back to two-step install+deploy")
                             update_bg_task(task_id, status="installing",
-                                           message="1Panel正在安装WordPress应用...")
+                                           message="1Panel正在安装WordPress应用(两步模式)...")
                             try:
                                 install_resp = panel_client.install_app(
                                     app_detail_id=s_app_detail_id, name=s_alias,
@@ -1320,84 +1335,105 @@ def register_routes(app):
                                     advanced=True, allow_port=True,
                                 )
                             except Exception as e:
-                                update_bg_task(task_id, status="failed", message=f"安装WordPress应用失败: {str(e)[:80]}")
-                                _rollback_deploy(s_db_name)
-                                return
+                                logger.error(f"Step2: install_app exception: {e}")
+                                install_resp = {"code": 500, "message": str(e)[:200]}
 
-                            if install_resp.get("code") != 200:
-                                update_bg_task(task_id, status="failed",
-                                               message=f"安装WordPress应用失败: {install_resp.get('message', '未知错误')[:80]}")
-                                _rollback_deploy(s_db_name)
-                                return
-
-                            time.sleep(5)
-
-                            # Get installed app ID
-                            try:
-                                new_installed = panel_client.search_installed_apps(name=s_alias)
-                                if new_installed.get("code") == 200:
-                                    new_app = next(
-                                        (a for a in new_installed.get("data", {}).get("items", [])
-                                         if a.get("name") == s_alias), None,
-                                    )
-                                    if new_app:
-                                        app_install_id = new_app.get("id")
-                                        container_name = new_app.get("container", "")
-                            except Exception:
-                                pass
-
-                            # Fallback Step 2b: Create deployment website
-                            update_bg_task(task_id, status="deploying",
-                                           message="1Panel正在部署网站...")
-                            for _attempt2 in range(3):
-                                try:
-                                    website_result = panel_client.create_website(
-                                        primary_domain=s_domain,
-                                        alias=s_alias,
-                                        app_type="installed",
-                                        app_install_id=app_install_id,
-                                        website_group_id=s_group_id,
-                                        enable_ipv6=False,
-                                        port=s_port,
-                                    )
-                                    if website_result.get("code") == 200:
-                                        break
-                                except Exception as e:
-                                    logger.error(f"Step2b: create_website exception: {e}")
+                            if install_resp.get("code") == 200:
+                                logger.info(f"Step2(fallback): install_app succeeded for {s_alias}")
                                 time.sleep(5)
 
-                            if website_result and website_result.get("code") == 200:
                                 try:
-                                    ws = panel_client.search_websites(name=s_domain)
-                                    if ws.get("code") == 200:
-                                        items = ws.get("data", {}).get("items") or []
-                                        for w in items:
-                                            if w.get("alias") == s_alias or w.get("primaryDomain") == s_domain:
-                                                panel_website_id = w.get("id")
-                                                break
-                                except Exception:
-                                    pass
-                            else:
-                                # Step 2b failed — fall back to manual nginx proxy config
-                                error_msg = website_result.get('message', '未知错误') if website_result else '无响应'
-                                logger.warning(f"Step2b: create_website failed ({error_msg}), falling back to nginx proxy")
-                                update_bg_task(task_id, status="deploying",
-                                               message="1Panel网站API不可用，正在手动配置nginx反向代理...")
-                                try:
-                                    nginx_resp = panel_client.create_nginx_proxy_config(
-                                        alias=s_alias, domain=s_domain, port=s_port,
-                                    )
-                                    if nginx_resp.get("code") == 200:
-                                        logger.info(f"Step2c: nginx proxy config created for {s_domain}")
-                                    else:
-                                        logger.warning(f"Step2c: nginx proxy config partial: {nginx_resp.get('message','')[:100]}")
-                                    # Continue with the flow — app is installed and nginx proxy is configured
+                                    new_installed = panel_client.search_installed_apps(name=s_alias)
+                                    if new_installed.get("code") == 200:
+                                        new_app = next(
+                                            (a for a in new_installed.get("data", {}).get("items", [])
+                                             if a.get("name") == s_alias), None,
+                                        )
+                                        if new_app:
+                                            app_install_id = new_app.get("id")
+                                            container_name = new_app.get("container", "")
+                                            logger.info(f"Step2(fallback): Found installed app id={app_install_id}")
                                 except Exception as e:
-                                    logger.error(f"Step2c: nginx proxy creation failed: {e}")
-                                    update_bg_task(task_id, status="failed",
-                                                   message=f"创建nginx反向代理失败: {str(e)[:80]}")
-                                    _rollback_deploy(s_db_name, app_install_id)
-                                    return
+                                    logger.warning(f"Step2(fallback): search_installed_apps failed: {e}")
+
+                                if app_install_id:
+                                    update_bg_task(task_id, status="deploying",
+                                                   message="1Panel正在创建网站并配置反向代理...")
+                                    for _attempt2 in range(3):
+                                        try:
+                                            logger.info(f"Step2(fallback): Creating deployment website for {s_domain} (attempt {_attempt2+1}/3)")
+                                            website_result = panel_client.create_website(
+                                                primary_domain=s_domain,
+                                                alias=s_alias,
+                                                app_type="installed",
+                                                app_install_id=app_install_id,
+                                                website_group_id=s_group_id,
+                                                enable_ipv6=False,
+                                                port=s_port,
+                                            )
+                                            logger.info(f"Step2(fallback): create_website(installed) response: code={website_result.get('code')}")
+                                            if website_result.get("code") == 200:
+                                                break
+                                            if "标识已存在" in str(website_result.get("message", "")):
+                                                unique_alias = f"{s_alias}-1"
+                                                logger.warning(f"Step2(fallback): Alias conflict, trying {unique_alias}")
+                                                website_result = panel_client.create_website(
+                                                    primary_domain=s_domain,
+                                                    alias=unique_alias,
+                                                    app_type="installed",
+                                                    app_install_id=app_install_id,
+                                                    website_group_id=s_group_id,
+                                                    enable_ipv6=False,
+                                                    port=s_port,
+                                                )
+                                                if website_result.get("code") == 200:
+                                                    s_alias = unique_alias
+                                                    break
+                                        except Exception as e:
+                                            logger.error(f"Step2(fallback): create_website(installed) exception: {e}")
+                                        time.sleep(5)
+
+                                    if website_result and website_result.get("code") == 200:
+                                        time.sleep(3)
+                                        try:
+                                            ws = panel_client.search_websites(name=s_domain)
+                                            if ws.get("code") == 200:
+                                                items = ws.get("data", {}).get("items") or []
+                                                for w in items:
+                                                    if w.get("alias") == s_alias or w.get("primaryDomain") == s_domain:
+                                                        panel_website_id = w.get("id")
+                                                        logger.info(f"Step2(fallback): Found website id={panel_website_id} for {s_domain}")
+                                                        break
+                                        except Exception as e:
+                                            logger.warning(f"Step2(fallback): search_websites failed: {e}")
+
+                                        update_bg_task(task_id, status="deploying",
+                                                       message="1Panel已部署网站(一键部署)，正在等待WordPress就绪...")
+                                else:
+                                    logger.warning(f"Step2(fallback): Could not find app_install_id after install")
+                            else:
+                                logger.warning(f"Step2(fallback): install_app failed ({install_resp.get('message','')[:100]})")
+
+                        # --- Last resort: manual nginx proxy config ---
+                        if not (website_result and website_result.get("code") == 200 and panel_website_id):
+                            error_msg = website_result.get('message', '未知错误') if website_result else '无响应'
+                            logger.warning(f"Step2: All paths failed ({error_msg}), falling back to nginx proxy")
+                            update_bg_task(task_id, status="deploying",
+                                           message="1Panel网站API不可用，正在手动配置nginx反向代理...")
+                            try:
+                                nginx_resp = panel_client.create_nginx_proxy_config(
+                                    alias=s_alias, domain=s_domain, port=s_port,
+                                )
+                                if nginx_resp.get("code") == 200:
+                                    logger.info(f"Step2: nginx proxy config created for {s_domain}")
+                                else:
+                                    logger.warning(f"Step2: nginx proxy config partial: {nginx_resp.get('message','')[:100]}")
+                            except Exception as e:
+                                logger.error(f"Step2: nginx proxy creation failed: {e}")
+                                update_bg_task(task_id, status="failed",
+                                               message=f"创建nginx反向代理失败: {str(e)[:80]}")
+                                _rollback_deploy(s_db_name, app_install_id)
+                                return
 
                         # Update local DB with panel IDs
                         try:
@@ -1456,23 +1492,38 @@ def register_routes(app):
                         )
 
                         if result.get("success"):
-                            # === Step 6: Install plugins ===
+                            # === Step 6: Install plugins and themes ===
+                            wp_url = f"http://{wp_host}:{s_port}"
+                            msg_parts = []
+
                             if s_plugin_ids:
                                 update_bg_task(task_id, status="installing",
                                                message=f"WordPress已安装，正在安装 {len(s_plugin_ids)} 个插件...")
                                 try:
-                                    wp_url = f"http://{wp_host}:{s_port}"
                                     plugin_results = install_plugins_to_site(
                                         wp_url, s_admin, s_password, s_plugin_ids)
                                     ok = sum(1 for r in plugin_results if r.get("status") == "success")
-                                    update_bg_task(task_id, status="installed",
-                                                   message=f"部署完成！WordPress已安装，{ok}/{len(s_plugin_ids)} 个插件安装成功")
+                                    msg_parts.append(f"{ok}/{len(s_plugin_ids)} 个插件")
                                 except Exception as pe:
-                                    update_bg_task(task_id, status="installed",
-                                                   message=f"部署完成！WordPress已安装，插件安装失败: {str(pe)[:60]}")
+                                    msg_parts.append(f"插件安装失败: {str(pe)[:40]}")
+
+                            if s_theme_ids:
+                                update_bg_task(task_id, status="installing",
+                                               message=f"正在安装 {len(s_theme_ids)} 个主题...")
+                                try:
+                                    theme_results = install_themes_to_site(
+                                        wp_url, s_admin, s_password, s_theme_ids)
+                                    ok = sum(1 for r in theme_results if r.get("status") == "success")
+                                    msg_parts.append(f"{ok}/{len(s_theme_ids)} 个主题")
+                                except Exception as te:
+                                    msg_parts.append(f"主题安装失败: {str(te)[:40]}")
+
+                            final_msg = "部署完成！WordPress已安装"
+                            if msg_parts:
+                                final_msg += "，" + "，".join(msg_parts)
                             else:
-                                update_bg_task(task_id, status="installed",
-                                               message="部署完成！1Panel(OpenResty) + WordPress 安装成功")
+                                final_msg += " (1Panel/OpenResty)"
+                            update_bg_task(task_id, status="installed", message=final_msg)
                         else:
                             update_bg_task(task_id, status="failed",
                                            message=f"WordPress初始化失败: {result.get('message', '未知错误')[:80]}")
@@ -1497,7 +1548,7 @@ def register_routes(app):
                     target=_bg_deploy,
                     args=(bg_task_id, site_id_for_bg, alias, domain, port, db_name, db_user, db_pass,
                           app_detail_id, app_id, db_service, default_admin, default_password,
-                          plugin_ids, group_id),
+                          plugin_ids, theme_ids, group_id),
                     daemon=True,
                 )
                 bg_thread.start()
@@ -2138,15 +2189,85 @@ def register_routes(app):
     @app.route("/api/cloudflare/dns-records/<zone_id>", methods=["GET"])
     @jwt_required()
     def cf_list_dns(zone_id):
-        """List DNS records for a zone. Query: ?account_id=<id> to use specific account."""
+        """List DNS records for a zone. Query: ?account_id=<id>&page=1&per_page=10."""
+        try:
+            if not _has_cf_credentials():
+                return jsonify({"code": 400, "message": "请先授权Cloudflare账户"}), 400
+            account_id = request.args.get("account_id", type=int)
+            page = request.args.get("page", 1, type=int)
+            per_page = request.args.get("per_page", 10, type=int)
+            cf = _get_cf_client(account_id)
+            resp = cf.list_dns_records(zone_id, page=page, per_page=per_page)
+            if resp.get("success"):
+                info = resp.get("result_info", {})
+                return jsonify({
+                    "code": 200,
+                    "data": resp.get("result", []),
+                    "total": info.get("total_count", 0),
+                    "page": info.get("page", page),
+                    "per_page": info.get("per_page", per_page),
+                    "total_pages": info.get("total_pages", 1),
+                })
+            return jsonify({"code": 500, "message": str(resp.get("errors", []))}), 500
+        except Exception as e:
+            return jsonify({"code": 500, "message": str(e)[:100]}), 500
+
+    @app.route("/api/cloudflare/dns-records/<zone_id>", methods=["POST"])
+    @jwt_required()
+    def cf_create_dns_record(zone_id):
+        """Create a DNS record directly on Cloudflare. Body: type, name, content, ttl, proxied, account_id."""
         try:
             if not _has_cf_credentials():
                 return jsonify({"code": 400, "message": "请先授权Cloudflare账户"}), 400
             account_id = request.args.get("account_id", type=int)
             cf = _get_cf_client(account_id)
-            resp = cf.list_dns_records(zone_id)
+            data = request.get_json(silent=True) or {}
+            record_type = data.get("type", "A")
+            record_name = data.get("name", "").strip()
+            record_content = data.get("content", "").strip()
+            ttl = data.get("ttl", 1)
+            proxied = data.get("proxied", False)
+            if not record_name or not record_content:
+                server_ip = _get_config_value("panel_server_ip") or config.PANEL_HOST
+                record_content = record_content or server_ip
+            if not record_name:
+                return jsonify({"code": 400, "message": "请提供DNS记录名称"}), 400
+            resp = cf.create_dns_record(zone_id, record_type, record_name, record_content, proxied=proxied, ttl=ttl)
             if resp.get("success"):
-                return jsonify({"code": 200, "data": resp.get("result", [])})
+                return jsonify({"code": 200, "data": resp.get("result", {})})
+            return jsonify({"code": 500, "message": str(resp.get("errors", []))}), 500
+        except Exception as e:
+            return jsonify({"code": 500, "message": str(e)[:100]}), 500
+
+    @app.route("/api/cloudflare/dns-records/<zone_id>/<record_id>", methods=["PUT"])
+    @jwt_required()
+    def cf_update_dns(zone_id, record_id):
+        """Update a DNS record. Body: type, name, content, ttl, proxied."""
+        try:
+            if not _has_cf_credentials():
+                return jsonify({"code": 400, "message": "请先授权Cloudflare账户"}), 400
+            account_id = request.args.get("account_id", type=int)
+            cf = _get_cf_client(account_id)
+            data = request.get_json(silent=True) or {}
+            resp = cf.update_dns_record(zone_id, record_id, data)
+            if resp.get("success"):
+                return jsonify({"code": 200, "data": resp.get("result", {})})
+            return jsonify({"code": 500, "message": str(resp.get("errors", []))}), 500
+        except Exception as e:
+            return jsonify({"code": 500, "message": str(e)[:100]}), 500
+
+    @app.route("/api/cloudflare/dns-records/<zone_id>/<record_id>", methods=["DELETE"])
+    @jwt_required()
+    def cf_delete_dns(zone_id, record_id):
+        """Delete a DNS record."""
+        try:
+            if not _has_cf_credentials():
+                return jsonify({"code": 400, "message": "请先授权Cloudflare账户"}), 400
+            account_id = request.args.get("account_id", type=int)
+            cf = _get_cf_client(account_id)
+            resp = cf.delete_dns_record(zone_id, record_id)
+            if resp.get("success"):
+                return jsonify({"code": 200, "data": resp.get("result", {})})
             return jsonify({"code": 500, "message": str(resp.get("errors", []))}), 500
         except Exception as e:
             return jsonify({"code": 500, "message": str(e)[:100]}), 500
@@ -2205,6 +2326,134 @@ def register_routes(app):
             return jsonify({"code": 200, "data": {"connected": resp.get("success", False)}})
         except Exception:
             return jsonify({"code": 200, "data": {"connected": False}})
+
+    # ---- WordPress.com Integration ----
+
+    @app.route("/api/wordpress-com/auth-url", methods=["GET"])
+    @jwt_required()
+    def wpcom_auth_url():
+        """Get WordPress.com OAuth2 authorization URL.
+        Client ID/Secret are configured via global_config or environment variables.
+        """
+        try:
+            client_id = os.environ.get("WPCOM_CLIENT_ID", "")
+            redirect_uri = os.environ.get("WPCOM_REDIRECT_URI", "")
+            if not client_id:
+                return jsonify({"code": 400, "message": "请在环境变量中配置 WPCOM_CLIENT_ID"}), 400
+            if not redirect_uri:
+                redirect_uri = request.host_url.rstrip("/") + "/api/wordpress-com/callback"
+            auth_url = WordPressComClient.get_auth_url(client_id, redirect_uri)
+            return jsonify({"code": 200, "data": {"auth_url": auth_url}})
+        except Exception as e:
+            return jsonify({"code": 500, "message": str(e)[:100]}), 500
+
+    @app.route("/api/wordpress-com/callback", methods=["GET", "POST"])
+    def wpcom_callback():
+        """Handle WordPress.com OAuth2 callback. Saves token to global_config."""
+        try:
+            code = request.args.get("code") or (request.get_json(silent=True) or {}).get("code")
+            if not code:
+                return jsonify({"code": 400, "message": "缺少授权码 code"}), 400
+
+            client_id = os.environ.get("WPCOM_CLIENT_ID", "")
+            client_secret = os.environ.get("WPCOM_CLIENT_SECRET", "")
+            redirect_uri = os.environ.get("WPCOM_REDIRECT_URI", "")
+            if not redirect_uri:
+                redirect_uri = request.host_url.rstrip("/") + "/api/wordpress-com/callback"
+
+            token_resp = WordPressComClient.exchange_code(
+                client_id, client_secret, code, redirect_uri
+            )
+            access_token = token_resp.get("access_token")
+            if not access_token:
+                return jsonify({"code": 500, "message": f"换取token失败: {token_resp}"}), 500
+
+            # Save to global_config
+            db = get_db()
+            db.execute(
+                "INSERT OR REPLACE INTO global_config (key, value) VALUES ('wpcom_token', ?)",
+                (access_token,),
+            )
+            db.execute(
+                "INSERT OR REPLACE INTO global_config (key, value) VALUES ('wpcom_connected', ?)",
+                ("true",),
+            )
+            db.commit()
+
+            # Validate and get user info
+            wpcom = WordPressComClient(access_token=access_token)
+            me_resp = wpcom.get_me()
+            if "error" not in me_resp:
+                db.execute(
+                    "INSERT OR REPLACE INTO global_config (key, value) VALUES ('wpcom_email', ?)",
+                    (me_resp.get("email", ""),),
+                )
+                db.commit()
+
+            return jsonify({"code": 200, "message": "WordPress.com 连接成功"})
+        except Exception as e:
+            logger.error(f"WP.com callback error: {e}")
+            return jsonify({"code": 500, "message": str(e)[:200]}), 500
+
+    @app.route("/api/wordpress-com/status", methods=["GET"])
+    @jwt_required()
+    def wpcom_status():
+        """Check WordPress.com connection status."""
+        try:
+            db = get_db()
+            row = db.execute(
+                "SELECT config_value FROM global_config WHERE config_key='wpcom_connected'"
+            ).fetchone()
+            connected = row and row[0] == "true"
+            email = ""
+            token = ""
+            if connected:
+                email_row = db.execute(
+                    "SELECT config_value FROM global_config WHERE config_key='wpcom_email'"
+                ).fetchone()
+                email = email_row[0] if email_row else ""
+                token_row = db.execute(
+                    "SELECT config_value FROM global_config WHERE config_key='wpcom_token'"
+                ).fetchone()
+                token = token_row[0] if token_row else ""
+            return jsonify({"code": 200, "data": {
+                "connected": connected,
+                "email": email,
+                "has_token": bool(token),
+            }})
+        except Exception as e:
+            return jsonify({"code": 500, "message": str(e)[:100]}), 500
+
+    @app.route("/api/wordpress-com/bind-domain", methods=["POST"])
+    @jwt_required()
+    def wpcom_bind_domain():
+        """Bind a custom domain to a WordPress.com site. Body: {domain}."""
+        try:
+            data = request.get_json(silent=True) or {}
+            domain = data.get("domain", "").strip()
+            if not domain:
+                return jsonify({"code": 400, "message": "请提供域名"}), 400
+
+            db = get_db()
+            token_row = db.execute(
+                                "SELECT config_value FROM global_config WHERE config_key='wpcom_token'"
+            ).fetchone()
+            if not token_row or not token_row[0]:
+                return jsonify({"code": 400, "message": "请先在设置中连接 WordPress.com"}), 400
+
+            wpcom = WordPressComClient(access_token=token_row[0])
+            primary = wpcom.get_primary_site()
+            if not primary:
+                return jsonify({"code": 400, "message": "未找到 WordPress.com 站点，请先在 WordPress.com 创建站点"}), 400
+
+            site_id = primary.get("ID") or primary.get("blog_id")
+            resp = wpcom.map_domain(int(site_id), domain)
+            if resp and "error" not in resp:
+                return jsonify({"code": 200, "data": resp, "message": f"域名 {domain} 已提交绑定到 WordPress.com"})
+            return jsonify({"code": 500, "message": f"域名绑定失败: {resp}"}), 500
+        except Exception as e:
+            logger.error(f"WP.com bind domain error: {e}")
+            return jsonify({"code": 500, "message": str(e)[:200]}), 500
 
     # ---- Feed Products (Google Merchant Center) ----
 
